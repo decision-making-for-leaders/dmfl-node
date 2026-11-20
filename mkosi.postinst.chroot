@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ -d /etc/pam.d ]]; then
+    find /etc/pam.d -mindepth 1 -exec mv {} /usr/lib/pam.d \;
+    rmdir /etc/pam.d
+fi
+
+# Get rid of obsolete stuff in the pam stack.
+find /usr/lib/pam.d/ -mindepth 1 -exec sed --in-place '/pam_shells.so/d' {} \;
+find /usr/lib/pam.d/ -mindepth 1 -exec sed --in-place '/pam_securetty.so/d' {} \;
+
+# Import your public key into root's keyring if needed
+if [ -f /usr/share/keyrings/sysupdate-release.gpg ]; then
+    gpg --import /usr/share/keyrings/sysupdate-release.gpg
+fi
+
+# From Iota: Fedora disables the userdb ssh dropin by default, but helpfully leaves it available in
+# the package so that we can just symlink it to a name that will be picked up by systemd-tmpfiles.
+if [[ -f /usr/lib/tmpfiles.d/20-systemd-userdb.conf.example ]]; then
+    ln --symbolic 20-systemd-userdb.conf.example /usr/lib/tmpfiles.d/20-systemd-userdb.conf
+fi
+
+# Mark any imported key associated with your release identity as ultimately trusted
+for fpr in $(gpg --list-keys --with-colons | awk -F: '$1 == "fpr" {print $10}'); do
+    echo "${fpr}:6:" | gpg --import-ownertrust
+done
+
+ln -sf ../usr/share/zoneinfo/UTC /etc/localtime
+ln -sf /dev/null /etc/systemd/system/systemd-firstboot.service
+ln -sf /dev/null /etc/systemd/system/systemd-machine-id-commit.service
+ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+
+# Not using afs
+rm -rf /afs 
+
+# Delete directories in order to create symlinks
+rm -rf /mnt /opt /srv /root
+
+ln -sf var/home /home
+ln -sf var/roothome /root
+ln -sf var/mnt /mnt
+ln -sf var/opt /opt
+ln -sf var/srv /srv
+
+(
+    cd /usr/share/selinux/iota
+    checkmodule -M -m -o iota_bless.mod iota_bless.te
+    semodule_package -o iota_bless.pp -m iota_bless.mod
+    semodule -n -i iota_bless.pp
+    rm -f iota_bless.mod
+)
+
+(
+    . /usr/lib/os-release
+    cat >/usr/lib/os-release <<EOF
+NAME="Iota ($NAME Flavour)"
+ID="$ID"
+ID_LIKE="rhel centos"
+PRETTY_NAME="Iota/$NAME $VERSION"
+FANCY_NAME="\033[0;38:2:252:186:3;1;49m⸭\033[0;38:2:252:186:3;49m Iota/$NAME Flavour $VERSION\033[0m"
+VERSION="$VERSION"
+VERSION_ID="$VERSION_ID"
+ANSI_COLOR="38:2:252:186:3;1;49"
+ANSI_COLOR_REVERSE="48;2;252;186;3;1;30"
+DEFAULT_HOSTNAME="iota-????-????"
+HOME_URL="https://github.com/ta-vroom/Iota/"
+EOF
+
+    cat >/usr/lib/issue <<EOF
+\e[0;38:2:252:186:3;1;49m▒\e[0m \e[0;38:2:252:186:3;1;49m⸭\e[0;38:2:252:186:3;49m Iota/$NAME Flavour $VERSION\e[0m
+\e[0;38:2:252:186:3;1;49m▒\e[0m Kernel \r on an \m (\l)
+
+EOF
+)

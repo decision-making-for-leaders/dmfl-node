@@ -1,0 +1,134 @@
+name: Build
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+on: 
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+  workflow_call:
+    inputs:
+      release_notes:
+        description: "Release notes listing updated packages"
+        required: false
+        type: string
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
+  build_release:
+    needs: test
+    name: Build Image
+    permissions:
+      contents: write
+      packages: write
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Prepare APT cache directory permissions
+        run: |
+          sudo mkdir -p /var/cache/apt/archives/partial
+          sudo chown -R runner:runner /var/cache/apt/archives
+
+      - name: Restore APT Cache
+        uses: actions/cache@v6
+        with:
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-apt-
+      
+      - name: Release Tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DATE=$(date +'%Y%m%d')
+
+          LATEST_NUM=$(gh release list --limit 100 --exclude-drafts --json tagName --jq '.[].tagName' \
+            | tr -d '\r' \
+            | sed -nE "s/^${DATE}$/0/p; s/^${DATE}\.([0-9]+)$/\1/p" \
+            | sort -n \
+            | tail -n 1)
+
+          # Ensure LATEST_NUM is strictly digits; otherwise treat as empty
+          if [[ ! "$LATEST_NUM" =~ ^[0-9]+$ ]]; then
+            LATEST_NUM=""
+          fi
+
+          if [ -z "$LATEST_NUM" ]; then
+            RELEASE_TAG="${DATE}"
+          else
+            RELEASE_TAG="${DATE}.$(( 10#$LATEST_NUM + 1 ))"
+          fi
+
+          printf "%s" "${RELEASE_TAG}" > mkosi.version
+          echo "RELEASE_TAG=${RELEASE_TAG}" >> $GITHUB_ENV
+
+      - name: setup-mkosi
+        uses: systemd/mkosi@v27
+
+      - name: Install Dependencies
+        run: |
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive\.ubuntu\.com|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt-get update
+          
+          PACKAGES=(systemd-boot systemd-repart systemd-ukify python3-pefile binutils mtools erofs-utils xfsprogs policycoreutils)
+          
+          sudo apt-get install -d -y "${PACKAGES[@]}"
+          sudo apt-get install -y "${PACKAGES[@]}"
+
+          # Clean obsolete debs
+          sudo apt-get autoclean
+      
+      - name: Mkosi variables
+        run: |
+          MAIN=$(mkosi summary --json | jq -r '.Images[] | select(.Image == "main")')
+          echo "IMAGE=$(echo $MAIN | jq -r '.Output')" >> $GITHUB_ENV
+          echo "UKI_FORMAT=$(echo $MAIN | jq -r '.UnifiedKernelImageFormat')" >> $GITHUB_ENV
+          echo "OUTPUT_DIR=$(echo $MAIN | jq -r '.OutputDirectory')" >> $GITHUB_ENV
+
+      - name: Build Images
+        run: |
+          sudo mkosi build --force
+         
+      - name: Sign and generate SHA256SUMS
+        env:
+          GPG_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          echo "$GPG_KEY" | gpg --batch --import
+          
+          sudo chown -R runner:runner ${{ env.OUTPUT_DIR }}
+
+          mv ${{ env.OUTPUT_DIR }}/${{ env.IMAGE }}.root-x86-64*.raw.zst .
+          mv ${{ env.OUTPUT_DIR }}/${{ env.UKI_FORMAT }}.efi .
+          mv ${{ env.OUTPUT_DIR }}/${{ env.IMAGE }}.raw.* .
+          
+          sha256sum ${{ env.UKI_FORMAT }}.efi ${{ env.IMAGE }}.* > SHA256SUMS
+          
+          gpg --batch --yes --pinentry-mode loopback \
+              --passphrase "$GPG_PASSPHRASE" \
+              --detach-sign --armor --output SHA256SUMS.gpg SHA256SUMS
+
+      - name: Publish GitHub Release Artifacts
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "${{ env.RELEASE_TAG }}"
+          body: ${{ inputs.release_notes }}
+          prerelease: false
+          files: |
+            ${{ env.UKI_FORMAT }}.efi
+            ${{ env.IMAGE }}.*
+            SHA256SUMS*
+
+      - name: Cache packages
+        if: always()
+        run: |
+          sudo chown -R runner:runner /var/cache/apt/archives
