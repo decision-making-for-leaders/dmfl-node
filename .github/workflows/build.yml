@@ -23,10 +23,12 @@ on:
 
 jobs:
   test:
+    if: ${{ inputs.skip_tests != true }}
     uses: ./.github/workflows/test.yml
 
   build_release:
     needs: test
+    if: ${{ !cancelled() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
     name: Build Image
     permissions:
       contents: write
