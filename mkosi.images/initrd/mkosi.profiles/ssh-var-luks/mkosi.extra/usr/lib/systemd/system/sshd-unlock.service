@@ -1,0 +1,18 @@
+[Unit]
+Description=Temporary SSH daemon for unlocking /var in initrd
+DefaultDependencies=no
+After=systemd-networkd.service efi.mount
+Wants=systemd-networkd.service efi.mount
+Conflicts=initrd-switch-root.target sysroot-var.mount
+Before=initrd-switch-root.target
+ConditionPathIsMountPoint=!/sysroot/var
+
+[Service]
+RuntimeDirectory=sshd-unlock
+RuntimeDirectoryMode=0700
+ExecStartPre=/usr/bin/ssh-keygen -t ed25519 -f /run/sshd-unlock/ssh_host_ed25519_key -N "" -q
+ExecStart=/usr/sbin/sshd -D -f /etc/ssh/sshd_unlock_config
+Restart=on-failure
+
+[Install]
+WantedBy=cryptsetup-pre.target

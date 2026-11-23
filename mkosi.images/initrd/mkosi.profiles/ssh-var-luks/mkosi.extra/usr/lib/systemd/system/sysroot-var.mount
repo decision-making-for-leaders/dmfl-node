@@ -1,0 +1,14 @@
+[Unit]
+Description=Persistent /var
+DefaultDependencies=no
+Conflicts=umount.target
+After=systemd-repart.service sysroot.mount systemd-cryptsetup@var.service
+Wants=systemd-repart.service
+Requires=sysroot.mount systemd-cryptsetup@var.service
+Before=sysroot-etc-overlay.service initrd-fs.target initrd-switch-root.target
+
+[Mount]
+What=/dev/mapper/var
+Where=/sysroot/var
+Type=xfs
+Options=defaults
