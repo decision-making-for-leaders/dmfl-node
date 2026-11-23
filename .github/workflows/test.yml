@@ -116,7 +116,8 @@ jobs:
           sed -i 's|^Path=https://.*|Path=http://10.0.2.2:8000/|' mkosi.extra/usr/lib/sysupdate.d/*.transfer
 
           # Enable serial console logging for headless QEMU CI builds only
-          sed -i '/^KernelCommandLine=/a \    console=ttyS0,115200n8' mkosi.conf
+          mkdir -p mkosi.conf.d
+          printf '[Content]\nKernelCommandLine=console=ttyS0,115200n8\n' > mkosi.conf.d/99-ci.conf
 
       - name: Build v1.0.0 Base Image
         run: |
