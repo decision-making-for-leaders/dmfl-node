@@ -1,2 +1,0 @@
-enable sysroot-var.mount
-enable sysroot-etc-overlay.service
