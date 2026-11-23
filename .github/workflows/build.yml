@@ -5,8 +5,13 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
-on: 
+on:
   workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: "Skip e2e tests"
+        type: boolean
+        default: false
   push:
     branches: [ main ]
   workflow_call:
