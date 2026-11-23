@@ -11,7 +11,7 @@ on:
       skip_tests:
         description: "Skip e2e tests"
         type: boolean
-        default: false
+        default: true
   push:
     branches: [ main ]
   workflow_call:
