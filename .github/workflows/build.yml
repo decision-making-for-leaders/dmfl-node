@@ -102,6 +102,10 @@ jobs:
           echo "UKI_FORMAT=$(echo $MAIN | jq -r '.UnifiedKernelImageFormat')" >> $GITHUB_ENV
           echo "OUTPUT_DIR=$(echo $MAIN | jq -r '.OutputDirectory')" >> $GITHUB_ENV
 
+      - name: Mkosi summary
+        run: |
+          echo $(mkosi summary)
+
       - name: Build Images
         run: |
           sudo mkosi build --force
