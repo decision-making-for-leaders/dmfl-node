@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mkdir -p /efi /usr/lib/systemd/system/cryptsetup-pre.target.wants
-ln -sf ../sshd-unlock.service /usr/lib/systemd/system/cryptsetup-pre.target.wants/
+chmod 755 /usr/libexec/repart-var-luks
+mkdir -p /efi /usr/lib/systemd/system/initrd.target.wants
+ln -sf ../sshd-unlock.service /usr/lib/systemd/system/initrd.target.wants/

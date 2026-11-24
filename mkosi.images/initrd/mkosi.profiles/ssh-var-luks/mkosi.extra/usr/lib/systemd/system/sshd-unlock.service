@@ -15,4 +15,4 @@ ExecStart=/usr/sbin/sshd -D -f /etc/ssh/sshd_unlock_config
 Restart=on-failure
 
 [Install]
-WantedBy=cryptsetup-pre.target
+WantedBy=initrd.target

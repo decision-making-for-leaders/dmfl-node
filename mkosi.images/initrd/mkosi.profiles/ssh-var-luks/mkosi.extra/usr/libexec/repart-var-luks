@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+KEYFILE=/run/repart-var.key
+trap 'rm -f "$KEYFILE"' EXIT
+
+if [ -e /dev/disk/by-partlabel/var ]; then
+    exec /usr/bin/systemd-repart --dry-run=no
+fi
+
+umask 0077
+while true; do
+    p1=$(systemd-ask-password --timeout=0 "Enter new passphrase for encrypted /var:")
+    if [ -z "$p1" ]; then
+        echo "Passphrase cannot be empty." >&2
+        continue
+    fi
+    p2=$(systemd-ask-password --timeout=0 "Confirm passphrase for encrypted /var:")
+    if [ "$p1" = "$p2" ]; then
+        printf '%s' "$p1" > "$KEYFILE"
+        unset p1 p2
+        break
+    fi
+    echo "Passphrases did not match, try again." >&2
+done
+
+/usr/bin/systemd-repart --dry-run=no --key-file="$KEYFILE"

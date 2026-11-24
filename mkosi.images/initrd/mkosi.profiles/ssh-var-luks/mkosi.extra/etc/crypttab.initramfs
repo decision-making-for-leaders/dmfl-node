@@ -1,1 +1,1 @@
-var PARTLABEL=var none luks,discard
+var PARTLABEL=var none luks,discard,noauto
