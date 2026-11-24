@@ -104,7 +104,7 @@ jobs:
 
       - name: Mkosi summary
         run: |
-          echo $(mkosi summary)
+          mkosi summary
 
       - name: Build Images
         run: |
