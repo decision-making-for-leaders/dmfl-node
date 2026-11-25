@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+config = json.load(sys.stdin)
+env = config.get("Environment") or {}
+root_mib = int(env.get("ROOT_SLOT_SIZE_MIB", "2048"))
+verity_mib = max(16, (root_mib + 63) // 64)
+
+gen_dir = pathlib.Path(".mkosi.repart.generated")
+gen_dir.mkdir(parents=True, exist_ok=True)
+verity_conf = gen_dir / "11-root-verity.conf"
+verity_conf.write_text(
+    "[Partition]\n"
+    "Type=root-verity\n"
+    "ReadOnly=yes\n"
+    "Label=%M_%A_verity\n"
+    "SplitName=%t.%U\n"
+    "Verity=hash\n"
+    "VerityMatchKey=root\n"
+    "Minimize=best\n"
+    f"PaddingMinBytes={verity_mib}M\n"
+)
+os.chmod(verity_conf, 0o644)
+
+build_sources = config.get("BuildSources") or []
+host_src = build_sources[0]["Source"] if build_sources else os.getcwd()
+host_gen_dir = str(pathlib.Path(host_src) / ".mkosi.repart.generated")
+
+repart_dirs = list(config.get("RepartDirectories") or [])
+if host_gen_dir not in repart_dirs:
+    repart_dirs.insert(0, host_gen_dir)
+config["RepartDirectories"] = repart_dirs
+
+json.dump(config, sys.stdout)
