@@ -1,6 +1,7 @@
 [Unit]
 Description=Persistent /var
 DefaultDependencies=no
+IgnoreOnIsolate=yes
 Conflicts=umount.target
 After=systemd-repart.service sysroot.mount systemd-cryptsetup@var.service
 Wants=systemd-repart.service
