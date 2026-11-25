@@ -409,8 +409,13 @@ jobs:
           fi
           capture_guest_diagnostics /tmp/guest-diag-boot1.txt
 
-          # 1. Verify systemd-repart.service succeeded on boot
-          $SSH_CMD "systemctl status systemd-repart.service --no-pager"
+          # 1. Verify systemd-repart.service succeeded on boot (runs in initrd; skipped in real root when repart.d is initrd-only)
+          $SSH_CMD '
+            set -euo pipefail
+            systemctl status systemd-repart.service --no-pager || true
+            test "$(systemctl show -p Result --value systemd-repart.service)" = "success"
+            journalctl -b -u systemd-repart.service --no-pager | grep -q "Finished systemd-repart.service"
+          '
 
           # 2. Verify the partition table actually has the '_empty' B slots and /var
           $SSH_CMD "lsblk -o NAME,PARTLABEL,PARTTYPE,PARTUUID,SIZE"
