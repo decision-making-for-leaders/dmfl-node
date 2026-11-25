@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_MIB="${ROOT_SLOT_SIZE_MIB:-2048}"
+VERITY_MIB=$(( (ROOT_MIB + 63) / 64 ))
+if [ "$VERITY_MIB" -lt 16 ]; then
+    VERITY_MIB=16
+fi
+
+mkdir -p /usr/lib/repart.d
+
+cat > /usr/lib/repart.d/11-root-verity.conf <<EOF
+[Partition]
+Type=root-verity
+ReadOnly=yes
+SizeMinBytes=${VERITY_MIB}M
+SizeMaxBytes=${VERITY_MIB}M
+EOF
+
+cat > /usr/lib/repart.d/12-root.conf <<EOF
+[Partition]
+Type=root
+ReadOnly=yes
+SizeMinBytes=${ROOT_MIB}M
+SizeMaxBytes=${ROOT_MIB}M
+EOF
+
+cat > /usr/lib/repart.d/21-root-verity.conf <<EOF
+[Partition]
+Type=root-verity
+Label=_empty
+ReadOnly=yes
+SizeMinBytes=${VERITY_MIB}M
+SizeMaxBytes=${VERITY_MIB}M
+EOF
+
+cat > /usr/lib/repart.d/22-root.conf <<EOF
+[Partition]
+Type=root
+Label=_empty
+ReadOnly=yes
+SizeMinBytes=${ROOT_MIB}M
+SizeMaxBytes=${ROOT_MIB}M
+EOF
