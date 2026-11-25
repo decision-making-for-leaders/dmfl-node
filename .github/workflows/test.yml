@@ -55,6 +55,8 @@ jobs:
               sleep 2
             done
             echo "::error::SSH never came up (see $log)"
+            echo "---- last ssh -v attempt ----"
+            $SSH_CMD -v true 2>&1 || true
             return 1
           }
 
@@ -210,6 +212,78 @@ jobs:
               journalctl -b -p err -n 200 --no-pager || true
             ' > "$out" 2>&1 || true
           }
+
+          # capture_serial_diagnostics <sock> <out-file>
+          # Connects to the QEMU serial unix socket, logs in as root, and captures diagnostics.
+          capture_serial_diagnostics() {
+            local sock=$1 out=$2
+            python3 - "$sock" "$out" <<'PY' || true
+          import os, re, select, socket, sys, time
+
+          sock_path, out_path = sys.argv[1], sys.argv[2]
+          if not os.path.exists(sock_path):
+              with open(out_path, "w") as f:
+                  f.write(f"(serial socket {sock_path} does not exist)\n")
+              sys.exit(0)
+
+          ansi_re = re.compile(rb"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x1b\x07]*(?:\x07|\x1b\\)|[PX^_].*?\x1b\\|[()][AB012]|.)")
+          cmd = (
+              "ip -br a; ss -tlnp; "
+              "systemctl --failed --no-pager --no-legend; "
+              "systemctl status sshd.socket 'sshd@*' dbus-broker.service systemd-homed.service --no-pager -l; "
+              "journalctl -b -u 'sshd*' -u dbus-broker.service -u systemd-homed.service --no-pager; "
+              "getenforce; ausearch -m avc -ts boot 2>/dev/null || grep -i avc /var/log/audit/audit.log 2>/dev/null || journalctl -b | grep -i avc; "
+              "ls -ldZ /var /var/etc /var/.etc-work /etc /etc/ssh /etc/ssh/authorized_keys /run /run/dbus 2>/dev/null; "
+              "journalctl -b -p err -n 100 --no-pager; "
+              'echo "__DIAG""_DONE__"\n'
+          ).encode()
+
+          s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          s.settimeout(5.0)
+          raw = bytearray()
+          try:
+              s.connect(sock_path)
+              s.setblocking(False)
+              s.sendall(b"\n")
+              sent_user = False
+              sent_pass = False
+              sent_cmd = False
+              buf = b""
+              deadline = time.monotonic() + 60
+              while time.monotonic() < deadline:
+                  r, _, _ = select.select([s], [], [], 1.0)
+                  if not r:
+                      if not sent_user:
+                          s.sendall(b"\n")
+                      continue
+                  data = s.recv(4096)
+                  if not data:
+                      break
+                  raw.extend(data)
+                  buf = ansi_re.sub(b"", buf + data).replace(b"\r", b"")
+                  if not sent_user and re.search(rb"(?:^|\n)[^\n]*login:\s*$", buf):
+                      s.sendall(b"root\n")
+                      sent_user = True
+                      buf = b""
+                  elif sent_user and not sent_pass and re.search(rb"Password:\s*$", buf):
+                      s.sendall(b"root\n")
+                      sent_pass = True
+                      buf = b""
+                  elif sent_user and not sent_cmd and re.search(rb"(?:^|\n)[^\n]*#\s*$", buf):
+                      s.sendall(cmd)
+                      sent_pass = True
+                      sent_cmd = True
+                      buf = b""
+                  elif sent_cmd and b"__DIAG_DONE__" in buf:
+                      break
+          finally:
+              s.close()
+
+          cleaned = ansi_re.sub(b"", bytes(raw)).replace(b"\r", b"")
+          with open(out_path, "wb") as f:
+              f.write(cleaned)
+          PY
+          }
           EOF
 
       - name: Prepare SSH Keys, Signing Keys & Test Transfer URLs
@@ -306,6 +380,7 @@ jobs:
           # Copy writable OVMF_VARS so UEFI boot entries persist across reboots
           cp /usr/share/OVMF/OVMF_VARS_4M.fd ./ovmf_vars.fd
           : > /tmp/serial-boot1.log
+          rm -f /tmp/serial-boot1.sock
 
           qemu-system-x86_64 \
             -enable-kvm -cpu host -m 2G -smp 2 \
@@ -315,7 +390,9 @@ jobs:
             -net nic,model=virtio \
             -device i6300esb -watchdog-action reset \
             -net user,hostfwd=tcp:127.0.0.1:2222-:22 \
-            -display none -monitor none -serial file:/tmp/serial-boot1.log \
+            -display none -monitor none \
+            -chardev socket,id=ser0,path=/tmp/serial-boot1.sock,server=on,wait=off,logfile=/tmp/serial-boot1.log,logappend=on \
+            -serial chardev:ser0 \
             -no-reboot &
           QEMU_PID=$!
           trap 'kill $QEMU_PID 2>/dev/null || true' EXIT
@@ -326,7 +403,10 @@ jobs:
           fi
 
           echo "Waiting for v1.0.0 guest SSH..."
-          wait_ssh 60 /tmp/serial-boot1.log
+          if ! wait_ssh 60 /tmp/serial-boot1.log; then
+            capture_serial_diagnostics /tmp/serial-boot1.sock /tmp/guest-diag-boot1.txt
+            exit 1
+          fi
           capture_guest_diagnostics /tmp/guest-diag-boot1.txt
 
           # 1. Verify systemd-repart.service succeeded on boot
@@ -373,6 +453,7 @@ jobs:
           source /tmp/ci-lib.sh
 
           : > /tmp/serial-boot2.log
+          rm -f /tmp/serial-boot2.sock
 
           # No -no-reboot here: the rollback test relies on the guest rebooting itself.
           qemu-system-x86_64 \
@@ -383,7 +464,9 @@ jobs:
             -net nic,model=virtio \
             -device i6300esb -watchdog-action reset \
             -net user,hostfwd=tcp:127.0.0.1:2222-:22 \
-            -display none -monitor none -serial file:/tmp/serial-boot2.log &
+            -display none -monitor none \
+            -chardev socket,id=ser0,path=/tmp/serial-boot2.sock,server=on,wait=off,logfile=/tmp/serial-boot2.log,logappend=on \
+            -serial chardev:ser0 &
           QEMU_PID=$!
           trap 'kill $QEMU_PID 2>/dev/null || true' EXIT
 
@@ -393,7 +476,10 @@ jobs:
           fi
 
           echo "Waiting for v1.0.1 guest SSH..."
-          wait_ssh 60 /tmp/serial-boot2.log
+          if ! wait_ssh 60 /tmp/serial-boot2.log; then
+            capture_serial_diagnostics /tmp/serial-boot2.sock /tmp/guest-diag-boot2.txt
+            exit 1
+          fi
           capture_guest_diagnostics /tmp/guest-diag-boot2.txt
 
           $SSH_CMD "lsblk -o NAME,PARTLABEL,PARTUUID,MOUNTPOINTS,SIZE"
@@ -483,7 +569,10 @@ jobs:
             echo "Unlocking /var via initrd SSH for rolled-back v1.0.0..."
             unlock_var_ssh 45 /tmp/serial-boot2.log "$LUKS_PASSPHRASE"
           fi
-          wait_ssh 75 /tmp/serial-boot2.log
+          if ! wait_ssh 75 /tmp/serial-boot2.log; then
+            capture_serial_diagnostics /tmp/serial-boot2.sock /tmp/guest-diag-boot2.txt
+            exit 1
+          fi
 
           ROLLBACK_VER=$($SSH_CMD ". /usr/lib/os-release && echo \$IMAGE_VERSION")
           echo "Rolled-back Booted Version: $ROLLBACK_VER"
