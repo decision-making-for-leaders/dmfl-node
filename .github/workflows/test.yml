@@ -37,7 +37,7 @@ jobs:
         run: |
           cat > /tmp/ci-lib.sh <<'EOF'
           SSH_CMD="ssh -i /tmp/ci_id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=3 -p 2222 root@127.0.0.1"
-          FATAL_RE='You are in emergency mode|Give root password for maintenance|Please configure the system|Kernel panic|Timed out waiting for device'
+          FATAL_RE='You are in emergency mode|Give root password for maintenance|Please configure the system|Kernel panic|Timed out waiting for device|Failed to start .*systemd-repart\.service'
 
           # wait_ssh <tries> <serial-log>
           # Polls SSH, but bails out immediately if the serial log shows a fatal boot state.
@@ -61,9 +61,10 @@ jobs:
           # unlock_var_ssh <tries> <serial-log> <passphrase>
           # Connects to initrd sshd-unlock, answers passphrase prompts via PTY, and waits for switch-root EOF.
           unlock_var_ssh() {
-            local tries=$1 log=$2 passphrase=$3 i
+            local tries=$1 log=$2 passphrase=$3 i rc
             for ((i = 0; i < tries; i++)); do
-              if python3 - "$passphrase" <<'PY'
+              rc=0
+              python3 - "$passphrase" <<'PY' || rc=$?
           import os, pty, re, select, signal, subprocess, sys, time
 
           passphrase = sys.argv[1]
@@ -85,6 +86,7 @@ jobs:
           prompt_re = re.compile(rb"(?i)(?:enter new passphrase|confirm passphrase|enter passphrase)[^:\r\n]*:")
           buf = b""
           answered = 0
+          eof = False
           deadline = time.monotonic() + 120
 
           try:
@@ -92,13 +94,16 @@ jobs:
                   r, _, _ = select.select([master], [], [], 1.0)
                   if not r:
                       if proc.poll() is not None:
+                          eof = True
                           break
                       continue
                   try:
                       data = os.read(master, 4096)
                   except OSError:
+                      eof = True
                       break
                   if not data:
+                      eof = True
                       break
                   sys.stdout.buffer.write(data)
                   sys.stdout.buffer.flush()
@@ -113,15 +118,24 @@ jobs:
                   proc.send_signal(signal.SIGTERM)
               proc.wait(timeout=5)
 
-          sys.exit(0 if answered > 0 else 1)
+          if answered > 0 and eof:
+              sys.exit(0)
+          if answered > 0 and not eof:
+              print("\nunlock_var_ssh: timed out waiting for switch-root EOF", file=sys.stderr)
+              sys.exit(2)
+          sys.exit(1)
           PY
-              then
+              if [ "$rc" -eq 0 ]; then
                 return 0
               fi
               if grep -qaE "$FATAL_RE" "$log" 2>/dev/null; then
                 echo "::error::Fatal boot state detected in $log while unlocking /var"
                 grep -aE "$FATAL_RE" "$log" | head -n 10 || true
                 return 2
+              fi
+              if [ "$rc" -eq 2 ]; then
+                echo "::error::Timed out waiting for switch-root after answering passphrase prompts (see $log)"
+                return 1
               fi
               sleep 2
             done
