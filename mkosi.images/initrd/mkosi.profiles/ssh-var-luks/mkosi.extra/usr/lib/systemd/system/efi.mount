@@ -5,7 +5,7 @@ Conflicts=umount.target initrd-switch-root.target
 Before=sshd-unlock.service initrd-switch-root.target
 
 [Mount]
-What=/dev/disk/by-parttypeuuid/c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+What=/dev/disk/by-partlabel/esp
 Where=/efi
 Type=vfat
 Options=ro,umask=0077

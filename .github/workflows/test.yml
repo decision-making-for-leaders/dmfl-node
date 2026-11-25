@@ -58,6 +58,77 @@ jobs:
             return 1
           }
 
+          # unlock_var_ssh <tries> <serial-log> <passphrase>
+          # Connects to initrd sshd-unlock, answers passphrase prompts via PTY, and waits for switch-root EOF.
+          unlock_var_ssh() {
+            local tries=$1 log=$2 passphrase=$3 i
+            for ((i = 0; i < tries; i++)); do
+              if python3 - "$passphrase" <<'PY'
+          import os, pty, re, select, signal, subprocess, sys, time
+
+          passphrase = sys.argv[1]
+          cmd = [
+              "ssh", "-tt",
+              "-i", "/tmp/ci_id_ed25519",
+              "-o", "StrictHostKeyChecking=no",
+              "-o", "UserKnownHostsFile=/dev/null",
+              "-o", "ConnectTimeout=3",
+              "-o", "BatchMode=yes",
+              "-p", "2222",
+              "root@127.0.0.1",
+          ]
+          master, slave = pty.openpty()
+          proc = subprocess.Popen(cmd, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+          os.close(slave)
+
+          ansi_re = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]")
+          prompt_re = re.compile(rb"(?i)(?:enter new passphrase|confirm passphrase|enter passphrase)[^:\r\n]*:")
+          buf = b""
+          answered = 0
+          deadline = time.monotonic() + 120
+
+          try:
+              while time.monotonic() < deadline:
+                  r, _, _ = select.select([master], [], [], 1.0)
+                  if not r:
+                      if proc.poll() is not None:
+                          break
+                      continue
+                  try:
+                      data = os.read(master, 4096)
+                  except OSError:
+                      break
+                  if not data:
+                      break
+                  sys.stdout.buffer.write(data)
+                  sys.stdout.buffer.flush()
+                  buf = ansi_re.sub(b"", buf + data)
+                  if prompt_re.search(buf):
+                      os.write(master, (passphrase + "\n").encode())
+                      answered += 1
+                      buf = b""
+          finally:
+              os.close(master)
+              if proc.poll() is None:
+                  proc.send_signal(signal.SIGTERM)
+              proc.wait(timeout=5)
+
+          sys.exit(0 if answered > 0 else 1)
+          PY
+              then
+                return 0
+              fi
+              if grep -qaE "$FATAL_RE" "$log" 2>/dev/null; then
+                echo "::error::Fatal boot state detected in $log while unlocking /var"
+                grep -aE "$FATAL_RE" "$log" | head -n 10 || true
+                return 2
+              fi
+              sleep 2
+            done
+            echo "::error::Timed out unlocking /var via SSH (see $log)"
+            return 1
+          }
+
           # inspect_root <erofs-image-or-device> <label>
           # Mounts a root image read-only and reports where ESP/by-uuid references come from.
           inspect_root() {
@@ -102,10 +173,24 @@ jobs:
 
       - name: Prepare SSH Keys, Signing Keys & Test Transfer URLs
         run: |
+          if mkosi summary --json | jq -e '.Images[] | select(.Image == "main") | (.Profiles // []) | index("ssh-var-luks") != null' >/dev/null; then
+            echo "SSH_VAR_LUKS=true" >> "$GITHUB_ENV"
+            SSH_VAR_LUKS=true
+          else
+            echo "SSH_VAR_LUKS=false" >> "$GITHUB_ENV"
+            SSH_VAR_LUKS=false
+          fi
+          echo "LUKS_PASSPHRASE=ci-test-passphrase" >> "$GITHUB_ENV"
+
           ssh-keygen -t ed25519 -f /tmp/ci_id_ed25519 -N ""
           mkdir -p mkosi.extra/etc/ssh/sshd_config.d
           cp /tmp/ci_id_ed25519.pub mkosi.extra/etc/ssh/authorized_keys
           chmod 644 mkosi.extra/etc/ssh/authorized_keys
+          if [ "$SSH_VAR_LUKS" = "true" ]; then
+            mkdir -p mkosi.extra/efi/unlock
+            cp /tmp/ci_id_ed25519.pub mkosi.extra/efi/unlock/authorized_keys
+            chmod 644 mkosi.extra/efi/unlock/authorized_keys
+          fi
           cat > mkosi.extra/etc/ssh/sshd_config.d/99-ci.conf <<'EOF'
           PermitRootLogin prohibit-password
           AuthorizedKeysFile .ssh/authorized_keys /etc/ssh/authorized_keys
@@ -194,6 +279,11 @@ jobs:
           QEMU_PID=$!
           trap 'kill $QEMU_PID 2>/dev/null || true' EXIT
 
+          if [ "${SSH_VAR_LUKS:-false}" = "true" ]; then
+            echo "Unlocking /var via initrd SSH for v1.0.0..."
+            unlock_var_ssh 45 /tmp/serial-boot1.log "$LUKS_PASSPHRASE"
+          fi
+
           echo "Waiting for v1.0.0 guest SSH..."
           wait_ssh 60 /tmp/serial-boot1.log
 
@@ -205,7 +295,11 @@ jobs:
           $SSH_CMD "blkid -t PARTLABEL=_empty"
 
           # 3. Verify persistent /var and /etc overlay are mounted and write test markers
-          $SSH_CMD 'test "$(findmnt -n -o SOURCE /var)" = "$(blkid -t PARTLABEL=var -o device)"'
+          if [ "${SSH_VAR_LUKS:-false}" = "true" ]; then
+            $SSH_CMD 'test "$(findmnt -n -o SOURCE /var)" = "/dev/mapper/var"'
+          else
+            $SSH_CMD 'test "$(findmnt -n -o SOURCE /var)" = "$(blkid -t PARTLABEL=var -o device)"'
+          fi
           $SSH_CMD 'test "$(findmnt -n -o FSTYPE /etc)" = "overlay"'
           $SSH_CMD 'getenforce | grep -qx Enforcing'
           $SSH_CMD 'mkdir -p /var/lib && echo "var-persisted-from-1.0.0" > /var/lib/persist-test'
@@ -251,6 +345,11 @@ jobs:
           QEMU_PID=$!
           trap 'kill $QEMU_PID 2>/dev/null || true' EXIT
 
+          if [ "${SSH_VAR_LUKS:-false}" = "true" ]; then
+            echo "Unlocking /var via initrd SSH for v1.0.1..."
+            unlock_var_ssh 45 /tmp/serial-boot2.log "$LUKS_PASSPHRASE"
+          fi
+
           echo "Waiting for v1.0.1 guest SSH..."
           wait_ssh 60 /tmp/serial-boot2.log
 
@@ -263,7 +362,11 @@ jobs:
           $SSH_CMD "lsblk -s -no PARTLABEL /dev/mapper/root | grep -qx iota_1.0.1"
 
           # Verify persistent /var and /etc overlay survived the A -> B slot switch
-          $SSH_CMD 'test "$(findmnt -n -o SOURCE /var)" = "$(blkid -t PARTLABEL=var -o device)"'
+          if [ "${SSH_VAR_LUKS:-false}" = "true" ]; then
+            $SSH_CMD 'test "$(findmnt -n -o SOURCE /var)" = "/dev/mapper/var"'
+          else
+            $SSH_CMD 'test "$(findmnt -n -o SOURCE /var)" = "$(blkid -t PARTLABEL=var -o device)"'
+          fi
           $SSH_CMD 'test "$(findmnt -n -o FSTYPE /etc)" = "overlay"'
           $SSH_CMD 'getenforce | grep -qx Enforcing'
           $SSH_CMD 'test "$(cat /var/lib/persist-test)" = "var-persisted-from-1.0.0"'
@@ -331,6 +434,12 @@ jobs:
             $SSH_CMD "test -f /run/awaiting-rollback" 2>/dev/null || break
             sleep 1
           done
+          if [ "${SSH_VAR_LUKS:-false}" = "true" ]; then
+            echo "Unlocking /var via initrd SSH for doomed v1.0.1 (+1-0)..."
+            unlock_var_ssh 45 /tmp/serial-boot2.log "$LUKS_PASSPHRASE"
+            echo "Unlocking /var via initrd SSH for rolled-back v1.0.0..."
+            unlock_var_ssh 45 /tmp/serial-boot2.log "$LUKS_PASSPHRASE"
+          fi
           wait_ssh 75 /tmp/serial-boot2.log
 
           ROLLBACK_VER=$($SSH_CMD ". /usr/lib/os-release && echo \$IMAGE_VERSION")

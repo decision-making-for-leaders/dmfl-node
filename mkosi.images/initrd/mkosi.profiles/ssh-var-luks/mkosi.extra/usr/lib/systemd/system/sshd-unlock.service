@@ -3,7 +3,7 @@ Description=Temporary SSH daemon for unlocking /var in initrd
 DefaultDependencies=no
 After=systemd-networkd.service efi.mount
 Wants=systemd-networkd.service efi.mount
-Conflicts=initrd-switch-root.target sysroot-var.mount
+Conflicts=initrd-switch-root.target
 Before=initrd-switch-root.target
 ConditionPathIsMountPoint=!/sysroot/var
 
