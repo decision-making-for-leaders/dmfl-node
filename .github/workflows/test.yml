@@ -183,6 +183,33 @@ jobs:
             done
             sudo losetup -d "$loop"
           }
+
+          # capture_guest_diagnostics <out-file>
+          # Captures failed systemd units, dbus-broker/homed journals, SELinux AVCs, and boot errors.
+          capture_guest_diagnostics() {
+            local out=$1
+            $SSH_CMD '
+              echo "==== systemctl --failed ===="
+              systemctl --failed --no-pager --no-legend || true
+              echo "==== dbus-broker & systemd-homed status ===="
+              systemctl status dbus-broker.service systemd-homed.service --no-pager -l || true
+              echo "==== dbus-broker & systemd-homed journal ===="
+              journalctl -b -u dbus-broker.service -u systemd-homed.service --no-pager || true
+              echo "==== failed unit journals ===="
+              systemctl --failed --no-pager --no-legend | while read -r u _; do
+                [ -n "$u" ] || continue
+                echo "--- $u ---"
+                journalctl -b -u "$u" -n 50 --no-pager || true
+              done
+              echo "==== SELinux status & AVCs ===="
+              getenforce || true
+              ausearch -m avc -ts boot 2>/dev/null || grep -i avc /var/log/audit/audit.log 2>/dev/null || journalctl -b | grep -i avc || true
+              echo "==== SELinux labels (/var, /etc, /run) ===="
+              ls -ldZ /var /var/etc /var/.etc-work /etc /run /run/dbus 2>/dev/null || true
+              echo "==== journalctl -b -p err ===="
+              journalctl -b -p err -n 200 --no-pager || true
+            ' > "$out" 2>&1 || true
+          }
           EOF
 
       - name: Prepare SSH Keys, Signing Keys & Test Transfer URLs
@@ -300,6 +327,7 @@ jobs:
 
           echo "Waiting for v1.0.0 guest SSH..."
           wait_ssh 60 /tmp/serial-boot1.log
+          capture_guest_diagnostics /tmp/guest-diag-boot1.txt
 
           # 1. Verify systemd-repart.service succeeded on boot
           $SSH_CMD "systemctl status systemd-repart.service --no-pager"
@@ -366,6 +394,7 @@ jobs:
 
           echo "Waiting for v1.0.1 guest SSH..."
           wait_ssh 60 /tmp/serial-boot2.log
+          capture_guest_diagnostics /tmp/guest-diag-boot2.txt
 
           $SSH_CMD "lsblk -o NAME,PARTLABEL,PARTUUID,MOUNTPOINTS,SIZE"
           BOOTED_VER=$($SSH_CMD ". /usr/lib/os-release && echo \$IMAGE_VERSION")
@@ -479,6 +508,13 @@ jobs:
       - name: Show serial logs on failure
         if: failure()
         run: |
+          for f in /tmp/guest-diag-boot1.txt /tmp/guest-diag-boot2.txt; do
+            if [ -s "$f" ]; then
+              echo "::group::$f"
+              cat "$f"
+              echo "::endgroup::"
+            fi
+          done
           for f in /tmp/serial-boot1.log /tmp/serial-boot2.log; do
             echo "::group::tail of $f"
             tail -n 300 "$f" 2>/dev/null || echo "(missing)"
@@ -495,6 +531,8 @@ jobs:
           name: sysupdate-e2e-debug
           if-no-files-found: ignore
           path: |
+            /tmp/guest-diag-boot1.txt
+            /tmp/guest-diag-boot2.txt
             /tmp/serial-boot1.log
             /tmp/serial-boot2.log
             /tmp/image-inspect-v100.txt
