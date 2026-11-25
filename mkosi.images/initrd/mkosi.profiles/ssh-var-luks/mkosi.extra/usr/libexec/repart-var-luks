@@ -5,7 +5,7 @@ KEYFILE=/run/repart-var.key
 trap 'rm -f "$KEYFILE"' EXIT
 
 if [ -e /dev/disk/by-partlabel/var ]; then
-    exec /usr/bin/systemd-repart --dry-run=no
+    exec /usr/bin/systemd-repart --dry-run=no --definitions=/usr/lib/repart.d
 fi
 
 umask 0077
@@ -24,4 +24,4 @@ while true; do
     echo "Passphrases did not match, try again." >&2
 done
 
-/usr/bin/systemd-repart --dry-run=no --key-file="$KEYFILE"
+/usr/bin/systemd-repart --dry-run=no --definitions=/usr/lib/repart.d --key-file="$KEYFILE"
