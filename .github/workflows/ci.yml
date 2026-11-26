@@ -34,23 +34,23 @@ jobs:
           test -e /dev/kvm && sudo chmod 666 /dev/kvm || true
 
       - name: Prepare SSH Keys, Signing Keys & Test Transfer URLs
-        run: ./test/prepare-ci.sh
+        run: ./tests/prepare-ci.sh
 
       - name: Build v1.0.0 Base Image
-        run: ./test/build-base.sh
+        run: ./tests/build-base.sh
 
       - name: Build v1.0.1 Update Payload & Start HTTP Server
-        run: ./test/build-update.sh
+        run: ./tests/build-update.sh
 
       - name: Boot v1.0.0 (UEFI), Verify systemd-repart & Run systemd-sysupdate
-        run: ./test/boot-v1-and-update.sh
+        run: ./tests/boot-v1-and-update.sh
 
       - name: Boot Updated Slot, Verify Blessing & Persistence, and Test Automatic Rollback
-        run: ./test/boot-v2-and-rollback.sh
+        run: ./tests/boot-v2-and-rollback.sh
 
       - name: Show serial logs on failure
         if: failure()
-        run: ./test/show-logs.sh
+        run: ./tests/show-logs.sh
 
       - name: Upload debug artifacts
         if: always()
