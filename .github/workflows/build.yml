@@ -24,7 +24,7 @@ on:
 jobs:
   test:
     if: ${{ inputs.skip_tests != true }}
-    uses: ./.github/workflows/test.yml
+    uses: ./.github/workflows/ci.yml
 
   build_release:
     needs: test

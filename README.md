@@ -96,7 +96,7 @@ All transfers set `ProtectVersion=%A` to prevent overwriting the currently boote
 │       └── mkosi.extra/                # Initrd repart.d/, mount-etc-overlay, systemd-repart override
 ├── mkosi.profiles/                     # Inherited upstream mkosi profile drop-ins (not enabled by default)
 └── .github/workflows/
-    ├── test.yml                        # Full QEMU/OVMF E2E test (repart, sysupdate A->B, bless-boot, rollback)
+    ├── ci.yml                          # Full QEMU/OVMF E2E test (repart, sysupdate A->B, bless-boot, rollback)
     ├── build.yml                       # Runs tests, builds signed artifacts, publishes GitHub Release
     └── shell.yml                       # Checks latest release RPM DB for upstream updates & triggers build
 ```
@@ -195,6 +195,6 @@ If a new UKI fails to reach `boot-complete.target` before its 3 boot tries expir
 
 ## CI/CD Workflows
 
-- **Verify (`test.yml`):** Runs on pull requests and manual dispatch. Builds `1.0.0` and `1.0.1`, resizes the disk by `+6G`, boots `1.0.0` in QEMU/OVMF, validates `systemd-repart`, `_empty` Slot B, `/var`, `/etc` overlay, and SELinux `Enforcing`, serves `1.0.1` over HTTP, runs `systemd-sysupdate update --verify=no`, reboots into Slot B (`iota_1.0.1`), verifies `systemd-bless-boot` and state persistence, and simulates a failed boot (`+1-0`) to confirm automatic rollback to `iota_1.0.0`.
-- **Build & Release (`build.yml`):** Runs on pushes to `main`, `workflow_dispatch`, or calls from `shell.yml`. Runs `test.yml`, builds date-versioned artifacts (`YYYYMMDD` / `YYYYMMDD.N`), signs `SHA256SUMS` with GPG, and publishes a GitHub Release.
+- **Verify (`ci.yml`):** Runs on pull requests and manual dispatch. Builds `1.0.0` and `1.0.1`, resizes the disk by `+6G`, boots `1.0.0` in QEMU/OVMF, validates `systemd-repart`, `_empty` Slot B, `/var`, `/etc` overlay, and SELinux `Enforcing`, serves `1.0.1` over HTTP, runs `systemd-sysupdate update --verify=no`, reboots into Slot B (`iota_1.0.1`), verifies `systemd-bless-boot` and state persistence, and simulates a failed boot (`+1-0`) to confirm automatic rollback to `iota_1.0.0`.
+- **Build & Release (`build.yml`):** Runs on pushes to `main`, `workflow_dispatch`, or calls from `shell.yml`. Runs `ci.yml`, builds date-versioned artifacts (`YYYYMMDD` / `YYYYMMDD.N`), signs `SHA256SUMS` with GPG, and publishes a GitHub Release.
 - **Update Check (`shell.yml`):** On `workflow_dispatch`, downloads the latest released root partition image, mounts it, and runs `dnf check-update` against `/usr/lib/sysimage/rpm/rpmdb.sqlite` inside an `almalinux` container. If package updates are available, it invokes `build.yml` with generated package diff release notes.
