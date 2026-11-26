@@ -7,6 +7,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 sudo mkosi --image-version=1.0.0 --force build
 sudo chown -R "$USER:$USER" mkosi.output
+test -n "$(find mkosi.output -maxdepth 1 -name 'iota_1.0.0_x86-64.root-x86-64-verity-sig.*.raw.zst' -print -quit)"
 zstd -d mkosi.output/iota_1.0.0_x86-64.raw.zst -o ./disk-test.raw
 
 {

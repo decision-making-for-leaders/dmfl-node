@@ -1,0 +1,15 @@
+[Transfer]
+ProtectVersion=%A
+
+[Source]
+Type=url-file
+Path=https://github.com/decision-making-for-leaders/dmfl-node/releases/latest/download/
+MatchPattern=%M_@v_%a.root-%a-verity-sig.@u.raw.zst
+
+[Target]
+Type=partition
+Path=auto
+MatchPartitionType=root-verity-sig
+MatchPattern=%M_@v_verity_sig
+InstancesMax=2
+ReadOnly=yes

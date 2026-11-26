@@ -9,6 +9,14 @@ fi
 
 mkdir -p /usr/lib/repart.d
 
+cat > /usr/lib/repart.d/10-root-verity-sig.conf <<EOF
+[Partition]
+Type=root-verity-sig
+ReadOnly=yes
+SizeMinBytes=16K
+SizeMaxBytes=16K
+EOF
+
 cat > /usr/lib/repart.d/11-root-verity.conf <<EOF
 [Partition]
 Type=root-verity
@@ -23,6 +31,15 @@ Type=root
 ReadOnly=yes
 SizeMinBytes=${ROOT_MIB}M
 SizeMaxBytes=${ROOT_MIB}M
+EOF
+
+cat > /usr/lib/repart.d/20-root-verity-sig.conf <<EOF
+[Partition]
+Type=root-verity-sig
+Label=_empty
+ReadOnly=yes
+SizeMinBytes=16K
+SizeMaxBytes=16K
 EOF
 
 cat > /usr/lib/repart.d/21-root-verity.conf <<EOF

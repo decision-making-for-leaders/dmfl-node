@@ -14,8 +14,9 @@ Iota builds a minimal, read-only Slot A image at build time and delegates Slot B
 
 > The initrd can be further customized by editing the files within mkosi.images/initrd
 
-**Build-time partitions (`mkosi.repart/`):**
+**Build-time partitions (`mkosi.repart/` & `iota/mkosi.repart/`):**
 - **ESP (`00-esp.conf`)** — `vfat`, `512M`–`1G`, populated with `systemd-boot` and the UKI.
+- **Root Verity Signature (`10-root-verity-sig.conf`)** — `root-verity-sig` (`%M_%A_verity_sig`, `16K`), PKCS#7 signature of the verity root hash bound via `VerityMatchKey=root`.
 - **Root Verity (`11-root-verity.conf`)** — `root-verity` (`%M_%A_verity`), minimized hash tree for Slot A.
 - **Root (`12-root.conf`)** — `erofs` (LZ4HC compressed, read-only, `%M_%A`), minimized and bound to `root-verity` via `VerityMatchKey=root`.
 
@@ -23,8 +24,9 @@ Iota builds a minimal, read-only Slot A image at build time and delegates Slot B
 
 **First-boot initrd expansion (`mkosi.images/initrd/mkosi.extra/usr/lib/repart.d/` & `mkosi.extra/usr/lib/repart.d/`):**
 On first boot, `systemd-repart.service` (ordered after `sysroot.mount` with `TMPDIR=/tmp`) expands the partition table into available disk space:
-- Keeps Slot A (`00-esp.conf`, `11-root-verity.conf`, `12-root.conf` at `2G`).
+- Keeps Slot A (`00-esp.conf`, `10-root-verity-sig.conf`, `11-root-verity.conf`, `12-root.conf` at `2G`).
 - Creates empty Slot B partitions labeled `_empty`:
+  - `20-root-verity-sig.conf` (`16K`, `root-verity-sig`)
   - `21-root-verity.conf` (`64M`, `root-verity`)
   - `22-root.conf` (`2G`, `root`)
 - Creates and formats persistent `/var` (`50-var.conf`, XFS, `Label=var`, `SizeMinBytes=300M`, `GrowFileSystem=yes`) with `/home`, `/etc`, `/.etc-work`, `/opt`, `/roothome`, `/mnt`, and `/srv`.
@@ -42,10 +44,11 @@ On first boot, `systemd-repart.service` (ordered after `sysroot.mount` with `TMP
 `mkosi.conf` produces split artifacts (`SplitArtifacts=uki,partitions`):
 - Full compressed disk image: `iota_<version>_<arch>.raw.zst`
 - Unified Kernel Image (with embedded initrd): `iota_<version>_<arch>.efi`
-- Split verity-linked root & hash partitions: `iota_<version>_<arch>.root-<arch>.<uuid>.raw.zst` and `iota_<version>_<arch>.root-<arch>-verity.<uuid>.raw.zst`
+- Split verity-linked root, hash & signature partitions: `iota_<version>_<arch>.root-<arch>.<uuid>.raw.zst`, `iota_<version>_<arch>.root-<arch>-verity.<uuid>.raw.zst`, and `iota_<version>_<arch>.root-<arch>-verity-sig.<uuid>.raw.zst`
 
-Updates are managed by `systemd-sysupdate` using three transfer definitions in `mkosi.extra/usr/lib/sysupdate.d/`:
+Updates are managed by `systemd-sysupdate` using four transfer definitions in `mkosi.extra/usr/lib/sysupdate.d/`:
 - `00-uki.transfer` — installs the UKI to `/EFI/Linux` on the ESP with `TriesLeft=3`, `TriesDone=0`, and `InstancesMax=2`.
+- `09-root-verity-sig.transfer` — writes the verity signature image to the spare `root-verity-sig` slot (`%M_@v_verity_sig`).
 - `10-root-verity.transfer` — writes the verity hash image to the spare `root-verity` slot (`%M_@v_verity`).
 - `11-root.transfer` — writes the root EROFS image to the spare `root` slot (`%M_@v`).
 
@@ -70,7 +73,7 @@ All transfers set `ProtectVersion=%A` to prevent overwriting the currently boote
 .
 ├── mkosi.conf                          # Main AlmaLinux 10 + Iota image definition
 ├── mkosi.postinst.chroot               # PAM cleanup, GPG trust, symlinks, iota_bless SELinux module, os-release/issue
-├── mkosi.repart/                       # Build-time disk image partition definitions (ESP, root-verity, root)
+├── mkosi.repart/                       # Build-time disk image partition definitions (root-verity-sig)
 ├── mkosi.sandbox/                      # Sandbox repo & GPG key for CentOS Hyperscale SIG systemd
 ├── mkosi.extra/                        # Files injected into the root image
 │   ├── efi/loader/loader.conf          # systemd-boot loader config
@@ -83,7 +86,7 @@ All transfers set `ProtectVersion=%A` to prevent overwriting the currently boote
 │       ├── lib/
 │       │   ├── repart.d/               # Runtime partition definitions (Slot A, _empty Slot B, /var)
 │       │   ├── systemd/                # var.mount & service presets (networkd, sshd.socket, bless-boot)
-│       │   ├── sysupdate.d/            # Transfer definitions for UKI, root-verity, and root
+│       │   ├── sysupdate.d/            # Transfer definitions for UKI, root-verity-sig, root-verity, and root
 │       │   └── tmpfiles.d/             # Persistent /var directory layout
 │       └── share/
 │           ├── keyrings/               # sysupdate release GPG keyring
@@ -123,16 +126,17 @@ Inspect the resolved configuration:
 mkosi summary
 ```
 
-Build the initrd and main disk image (`RootPassword=root` is set in `mkosi.conf` for local testing):
+Generate a verity signing key and certificate (`mkosi.key` and `mkosi.crt`), then build the initrd and main disk image (`RootPassword=root` is set in `mkosi.conf` for local testing):
 
 ```bash
+mkosi genkey
 sudo mkosi --image-version=1.0.0 --force build
 ```
 
 Build artifacts are written to `mkosi.output/`, including:
 - `iota_1.0.0_x86-64.raw.zst` (compressed GPT disk image)
 - `iota_1.0.0_x86-64.efi` (Unified Kernel Image)
-- `iota_1.0.0_x86-64.root-x86-64.<uuid>.raw.zst` and `iota_1.0.0_x86-64.root-x86-64-verity.<uuid>.raw.zst`
+- `iota_1.0.0_x86-64.root-x86-64.<uuid>.raw.zst`, `iota_1.0.0_x86-64.root-x86-64-verity.<uuid>.raw.zst`, and `iota_1.0.0_x86-64.root-x86-64-verity-sig.<uuid>.raw.zst`
 
 ### Boot in QEMU (UEFI)
 
