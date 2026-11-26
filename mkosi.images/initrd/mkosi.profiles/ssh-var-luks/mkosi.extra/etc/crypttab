@@ -1,1 +1,1 @@
-var PARTLABEL=var none luks,discard,noauto,x-systemd.device-timeout=0
+var PARTLABEL=var none luks,discard,noauto,tpm2-device=auto,x-systemd.device-timeout=0
