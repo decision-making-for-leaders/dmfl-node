@@ -2,23 +2,24 @@
 set -euo pipefail
 
 KEYFILE=/run/repart-var.key
-RUN_REPART_VAR=/run/repart.d/50-var.conf
-trap 'rm -f "$KEYFILE" "$RUN_REPART_VAR"' EXIT
+RUN_REPART_DIR=/run/repart-var-luks.d
+trap 'rm -rf "$KEYFILE" "$RUN_REPART_DIR"' EXIT
 
 if [ -e /dev/disk/by-partlabel/var ]; then
-    exec /usr/bin/systemd-repart --dry-run=no >/dev/console 2>&1
+    exec /usr/bin/systemd-repart --dry-run=no --definitions=/usr/lib/repart.d >/dev/console 2>&1
 fi
 
 if command -v systemd-creds >/dev/null 2>&1 && systemd-creds has-tpm2 --quiet 2>/dev/null; then
     echo "TPM2 detected; encrypting /var automatically with TPM2." >/dev/console
-    mkdir -p /run/repart.d
+    mkdir -p "$RUN_REPART_DIR"
+    cp /usr/lib/repart.d/*.conf "$RUN_REPART_DIR/"
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
             Encrypt=*) printf 'Encrypt=tpm2\n' ;;
             *) printf '%s\n' "$line" ;;
         esac
-    done < /usr/lib/repart.d/50-var.conf > "$RUN_REPART_VAR"
-    /usr/bin/systemd-repart --dry-run=no >/dev/console 2>&1
+    done < /usr/lib/repart.d/50-var.conf > "$RUN_REPART_DIR/50-var.conf"
+    /usr/bin/systemd-repart --dry-run=no --definitions="$RUN_REPART_DIR" >/dev/console 2>&1
     udevadm settle || true
     exit 0
 fi
@@ -42,7 +43,7 @@ while true; do
 done
 
 umask 0022
-/usr/bin/systemd-repart --dry-run=no --key-file="$KEYFILE" >/dev/console 2>&1
+/usr/bin/systemd-repart --dry-run=no --definitions=/usr/lib/repart.d --key-file="$KEYFILE" >/dev/console 2>&1
 udevadm settle || true
 
 if [ -e /dev/disk/by-partlabel/var ] && [ ! -e /dev/mapper/var ]; then
