@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+KEY_DIR=/var/lib/ssh
+KEY_FILE="$KEY_DIR/ssh_host_ed25519_key"
+
+umask 077
+mkdir -p "$KEY_DIR"
+chmod 0700 "$KEY_DIR"
+
+if [ ! -s "$KEY_FILE" ]; then
+    rm -f "$KEY_FILE" "$KEY_FILE.pub"
+    ssh-keygen -t ed25519 -f "$KEY_FILE" -N "" -q
+fi
+
+chmod 0600 "$KEY_FILE"
+if [ -f "$KEY_FILE.pub" ]; then
+    chmod 0644 "$KEY_FILE.pub"
+fi
+
+if command -v restorecon >/dev/null 2>&1; then
+    restorecon -R "$KEY_DIR" 2>/dev/null || true
+fi

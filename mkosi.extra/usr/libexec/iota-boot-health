@@ -1,0 +1,155 @@
+#!/bin/sh
+# Control-path health gate ordered before boot-complete.target.
+# Commits pending Tier 3 site config on success; on failure, reboots only
+# when a pending site generation or an unblessed OS slot is being trialed.
+set -eu
+
+HEALTH_TIMEOUT_SEC=30
+HEALTH_POLL_INTERVAL_SEC=2
+HEALTH_FALLBACK_PROBES="https://1.1.1.1/ https://8.8.8.8/"
+WG_REQUIRE_HANDSHAKE=0
+
+if [ -r /usr/lib/iota/health.conf ]; then
+    # shellcheck source=/dev/null
+    . /usr/lib/iota/health.conf
+fi
+
+WG_CRED=/etc/credstore.encrypted/network.wireguard.private.wg0
+WG_DROPIN=/etc/systemd/network/50-wg0.network.d/10-address.conf
+SYSUPDATE_TRANSFER=/usr/lib/sysupdate.d/00-uki.transfer
+
+log_msg() {
+    printf '%s\n' "$*" >&2
+    if [ -w /dev/console ]; then
+        printf '%s\n' "$*" > /dev/console 2>/dev/null || true
+    fi
+}
+
+sysupdate_url=
+if [ -r "$SYSUPDATE_TRANSFER" ]; then
+    sysupdate_url=$(awk -F= '/^[[:space:]]*Path=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' "$SYSUPDATE_TRANSFER" || true)
+fi
+
+fail_reason=""
+
+check_health() {
+    if ! systemctl is-active --quiet sshd.socket && ! systemctl is-active --quiet sshd.service; then
+        fail_reason="sshd inactive"
+        return 1
+    fi
+
+    if ! systemctl is-active --quiet firewalld.service; then
+        fail_reason="firewalld inactive"
+        return 1
+    fi
+
+    if ! ip -4 route show default 2>/dev/null | grep -q . \
+        && ! ip -6 route show default 2>/dev/null | grep -q .; then
+        fail_reason="no default route"
+        return 1
+    fi
+
+    probe_ok=no
+    for url in $sysupdate_url $HEALTH_FALLBACK_PROBES; do
+        [ -n "$url" ] || continue
+        if curl -sS --connect-timeout 3 --max-time 6 -o /dev/null "$url" 2>/dev/null; then
+            probe_ok=yes
+            break
+        fi
+    done
+    if [ "$probe_ok" != yes ]; then
+        fail_reason="outbound probes failed"
+        return 1
+    fi
+
+    if [ -f "$WG_CRED" ]; then
+        if ! ip link show dev wg0 >/dev/null 2>&1; then
+            fail_reason="wg0 interface missing"
+            return 1
+        fi
+
+        port=$(wg show wg0 listen-port 2>/dev/null || true)
+        case "$port" in
+            ''|*[!0-9]*)
+                fail_reason="wg0 invalid listen-port"
+                return 1
+                ;;
+        esac
+        if [ "$port" -le 0 ]; then
+            fail_reason="wg0 listen-port <= 0"
+            return 1
+        fi
+
+        if ! wg show wg0 public-key 2>/dev/null | grep -q .; then
+            fail_reason="wg0 missing public-key"
+            return 1
+        fi
+
+        if [ -r "$WG_DROPIN" ]; then
+            addrs=$(awk -F= '/^[[:space:]]*Address=/{gsub(/[[:space:]]/, "", $2); if ($2 != "") print $2}' "$WG_DROPIN" || true)
+            if [ -z "$addrs" ]; then
+                fail_reason="wg0 drop-in has no Address="
+                return 1
+            fi
+            wg_ip_out=$(ip -o addr show dev wg0 2>/dev/null || true)
+            for addr in $addrs; do
+                if ! printf '%s\n' "$wg_ip_out" | grep -qF " $addr "; then
+                    fail_reason="wg0 missing address $addr"
+                    return 1
+                fi
+            done
+        fi
+
+        if [ "$WG_REQUIRE_HANDSHAKE" = "1" ] \
+            && wg show wg0 endpoints 2>/dev/null | awk 'NF>=2 && $2!="(none)"{found=1} END{exit !found}'; then
+            if ! wg show wg0 latest-handshakes 2>/dev/null | awk 'NF>=2 && $2+0 > 0{ok=1} END{exit !ok}'; then
+                fail_reason="wg0 no peer handshake"
+                return 1
+            fi
+        fi
+    fi
+
+    return 0
+}
+
+now=$(date +%s)
+deadline=$((now + HEALTH_TIMEOUT_SEC))
+passed=no
+
+while :; do
+    if check_health; then
+        passed=yes
+        break
+    fi
+    now=$(date +%s)
+    if [ "$now" -ge "$deadline" ]; then
+        break
+    fi
+    sleep "$HEALTH_POLL_INTERVAL_SEC"
+done
+
+if [ "$passed" = yes ]; then
+    site_mode=$(cat /run/iota-site/mode 2>/dev/null || echo none)
+    if [ "$site_mode" = "pending" ]; then
+        /usr/libexec/iota-site commit
+    fi
+    log_msg "iota-boot-health: PASS"
+    exit 0
+fi
+
+site_mode=$(cat /run/iota-site/mode 2>/dev/null || echo none)
+bless_status=$(/usr/lib/systemd/systemd-bless-boot status 2>/dev/null | head -n 1 || true)
+[ -n "$bless_status" ] || bless_status=disabled
+
+if [ "$site_mode" = "pending" ]; then
+    log_msg "iota-boot-health: FAIL on pending site config ($fail_reason); rebooting to consume site try"
+    systemctl --no-block reboot
+    exit 1
+elif [ "$bless_status" = "indeterminate" ]; then
+    log_msg "iota-boot-health: FAIL on unblessed OS slot ($fail_reason); rebooting to consume boot try"
+    systemctl --no-block reboot
+    exit 1
+else
+    log_msg "iota-boot-health: FAIL on blessed OS slot with no pending site config ($fail_reason); NOT rebooting (isolated host guard)"
+    exit 1
+fi

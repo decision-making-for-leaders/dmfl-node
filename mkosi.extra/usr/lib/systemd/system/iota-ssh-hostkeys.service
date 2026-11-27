@@ -1,0 +1,14 @@
+[Unit]
+Description=Ensure persistent Iota SSH host key exists on /var
+DefaultDependencies=no
+After=local-fs.target
+Before=sshd.socket sshd.service shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/iota-ssh-hostkeys
+
+[Install]
+WantedBy=sshd.socket multi-user.target

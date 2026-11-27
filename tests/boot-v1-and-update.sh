@@ -37,10 +37,28 @@ ssh_guest '
 ssh_guest "lsblk -o NAME,PARTLABEL,PARTTYPE,PARTUUID,SIZE"
 ssh_guest "blkid -t PARTLABEL=_empty"
 
-# 3. Verify persistent /var and /etc overlay are mounted and write test markers
+# 3. Verify persistent /var, volatile /etc overlay, Tier 1 identity, and write test markers
 verify_mounts_and_selinux
+wait_boot_health
+ssh_guest '
+  set -euo pipefail
+  ! ls /etc/ssh/ssh_host_* >/dev/null 2>&1
+  test -s /var/lib/ssh/ssh_host_ed25519_key.pub
+  test -s /etc/machine-id
+'
+ssh_guest 'cat /etc/machine-id' | tee /tmp/machine-id-v100.txt
+ssh_guest 'cat /var/lib/ssh/ssh_host_ed25519_key.pub' | tee /tmp/ssh-hostkey-v100.txt
 ssh_guest 'mkdir -p /var/lib && echo "var-persisted-from-1.0.0" > /var/lib/persist-test'
-ssh_guest 'echo "etc-persisted-from-1.0.0" > /etc/persist-etc-test'
+ssh_guest 'echo "ephemeral-from-1.0.0" > /etc/ephemeral-etc-test'
+
+# 3b. WireGuard: image-baked wg0 is inert without a credential, then comes up
+#     after per-host provisioning (secret on /var/lib/credstore.encrypted,
+#     address managed under /var/lib/iota/site/).
+ssh_guest '! ip link show wg0 >/dev/null 2>&1'
+ssh_guest '/usr/libexec/iota-wg-provision 10.100.0.10/24'
+wait_wg0 10.100.0.10/24
+ssh_guest 'wg show wg0 public-key' | tee /tmp/wg0-pubkey-v100.txt
+ssh_guest '/usr/libexec/iota-site status | grep -qx "current: gens/1"'
 
 # Record how the ESP is mounted on the running v1.0.0 system (useful for debugging UUID mismatches)
 ssh_guest 'findmnt /efi; blkid | grep -i vfat; cat /etc/fstab 2>/dev/null || true' | tee /tmp/guest-esp-v100.txt

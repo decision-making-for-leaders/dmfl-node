@@ -29,13 +29,22 @@ On first boot, `systemd-repart.service` (ordered after `sysroot.mount` with `TMP
   - `22-root.conf` (`2G`, `root`)
 - Creates and formats persistent `/var` (`50-var.conf`, XFS, `Label=var`, `SizeMinBytes=300M`, `GrowFileSystem=yes`) with `/home`, `/etc`, `/.etc-work`, `/opt`, `/roothome`, `/mnt`, and `/srv`.
 
-### 2. Immutable Root & Persistent State
+### 2. Immutable Root, Stateless `/etc` & Three-Tier State
 
 - **Read-only `/`:** `/` is mounted from the `dm-verity` protected EROFS image (`/dev/mapper/root`).
 - **Persistent `/var`:** Mounted in the initrd (`sysroot-var.mount`) and post-switch-root (`var.mount`) from `/dev/disk/by-partlabel/var`.
-- **Writable `/etc` overlay:** `sysroot-etc-overlay.service` runs `/usr/libexec/mount-etc-overlay` in the initrd, mounting an OverlayFS over `/sysroot/etc` using `/sysroot/var/etc` as the upper directory and `/sysroot/var/.etc-work` as the work directory (falling back to `/run/etc-*` if `/sysroot/var` is absent).
+- **Stateless volatile `/etc`:** In the initrd, `/usr/libexec/mount-etc-overlay` (`mkosi.images/initrd/mkosi.extra/usr/libexec/mount-etc-overlay`) mounts an OverlayFS over `/sysroot/etc` whose `upperdir` and `workdir` live on a dedicated `tmpfs` (`/run/.etc-overlay`). Arbitrary writes to `/etc` never persist across reboots or leak across A/B rollbacks.
+- **Explicit three-tier configuration split:**
+
+| Tier | Examples | Storage | Rollback behaviour |
+|------|----------|---------|--------------------|
+| **1. Identity** (host-generated, never shipped) | WireGuard private key (`/etc/credstore.encrypted` → `/var/lib/credstore.encrypted`), SSH host key (`/var/lib/ssh/ssh_host_ed25519_key`), `/etc/machine-id` (`/var/lib/iota/machine-id`) | Persistent `/var` (bind-mounted/copied before `switch-root` or read directly via config) | Never rolled back |
+| **2. Fleet policy** (same on every host, public-safe) | WireGuard topology & peer pubkeys (`50-wg0.{netdev,network}`), firewalld policies, fallback DHCP (`95-fallback-dhcp.network`), health gate (`health.conf`), systemd units | dm-verity `/usr` in each A/B slot | Rolls back atomically with the slot via `systemd-bless-boot` |
+| **3. Site data** (per-host, can break networking) | Per-host WireGuard tunnel address, optional hostname | `/var/lib/iota/site/{gens,current,pending,pending.tries}` | Gated by 3-try trial/commit; falls back to `current` when tries hit 0 |
+
 - **Persistent top-level directories:** `/home`, `/root`, `/mnt`, `/opt`, and `/srv` are symlinked into `var/*` (`var/home`, `var/roothome`, `var/mnt`, `var/opt`, `var/srv`) and initialized via `usr/lib/tmpfiles.d/50-var-dirs.conf`.
 - **Stateless PAM stack:** `/etc/pam.d` is moved to `/usr/lib/pam.d` during image build, with obsolete `pam_shells.so` and `pam_securetty.so` lines removed.
+- **Fallback control path:** `95-fallback-dhcp.network` configures DHCP + IPv6 RA on physical ethernet interfaces independently of WireGuard or per-host site data.
 
 ### 3. Atomic A/B Updates & Automatic Rollback
 
@@ -61,6 +70,74 @@ All transfers set `ProtectVersion=%A` to prevent overwriting the currently boote
 - **Minimal attack surface:** Package managers (`dnf`, `dnf-data`, `dnf-plugins-core`, `yum`, `dracut`) are removed from the runtime image (`RemovePackages=`).
 - **Base services & tools:** `systemd-networkd`, `systemd-resolved`, `systemd-timesyncd`, socket-activated `sshd.socket`, `firewalld`, `podman`, `wireguard-tools`, `fish`, `vim` (`EDITOR`/`VISUAL`), and `bat` (`PAGER`).
 - **Repositories:** AlmaLinux 10 + EPEL + CentOS Stream Hyperscale SIG `systemd` repo (`mkosi.sandbox/etc/yum.repos.d/centos-hyperscale-systemd.repo`).
+
+### 5. WireGuard Mesh, Site Data Trial/Commit & Health Gate
+
+Release artifacts are public, so WireGuard and per-host site settings are split across the three tiers:
+
+| What | Where | Versioned by |
+|------|-------|--------------|
+| Interface, listen port, full peer list (public keys, endpoints, `AllowedIPs`) | `mkosi.extra/usr/lib/systemd/network/50-wg0.{netdev,network}` (dm-verity `/usr`) | A/B slots, rolls back with `systemd-bless-boot` |
+| Inbound `51820/udp` | `mkosi.extra/usr/lib/firewalld/policies/iota-wireguard-ingress.xml` | A/B slots |
+| Per-host private key | `/etc/credstore.encrypted/network.wireguard.private.wg0` (bind-mounted from `/var/lib/credstore.encrypted`) | Tier 1 `/var` (never rolled back) |
+| Per-host tunnel address & optional hostname | `/var/lib/iota/site/gens/<N>/` staged to `/etc/systemd/network/50-wg0.network.d/10-address.conf` (and `/etc/hostname`) on boot | Tier 3 trial/commit (`iota-site`) |
+
+- `50-wg0.netdev` uses `PrivateKey=@network.wireguard.private.wg0`. `systemd-networkd.service` already has `ImportCredential=network.wireguard.*`, which reads from the bind-mounted `/etc/credstore.encrypted`, so no unit drop-in is needed.
+- `[Match] Credential=network.wireguard.private.wg0` makes `wg0` inert on hosts that haven't been provisioned.
+- You can list every node, including the local one, as a `[WireGuardPeer]`. The kernel silently ignores a peer whose public key matches its own, so one peer list works on every host.
+
+**Initial provisioning (once per host):**
+
+```bash
+/usr/libexec/iota-wg-provision 10.100.0.3/24
+```
+
+This generates the encrypted key (no PCR binding, so UKI and firmware updates don't lock it out), commits generation `gens/1` as `current`, restarts `systemd-networkd`, and prints the `[WireGuardPeer]` block to commit into `50-wg0.netdev`. Peers learn about the new node from the next release.
+
+**Updating per-host site data with trial/commit (`iota-site`):**
+
+Once `current` exists, subsequent `iota-wg-provision <new-addr/prefix>` calls (or `/usr/libexec/iota-site stage --wg-address ... --hostname ... --tries 3`) stage a `pending` generation under `/var/lib/iota/site/` without overwriting `current`. On reboot:
+1. `iota-site-apply.service` decrements `pending.tries` and stages `pending` into volatile `/etc` (or falls back to `current` and records `last-failed` once `pending.tries` hits `0`).
+2. `iota-boot-health.service` runs before `boot-complete.target` (and at `multi-user.target`) and verifies:
+   - `sshd.socket` (or `sshd.service`) and `firewalld.service` are active,
+   - a default route exists,
+   - at least one HTTP/TLS probe succeeds across the configured `sysupdate` URL or fallback probes (`https://1.1.1.1/`, `https://8.8.8.8/`) — preventing a GitHub release outage from causing false rollbacks while catching broken routing or egress firewall rules, and
+   - if WireGuard is provisioned (`network.wireguard.private.wg0` exists), `wg0` is present with a positive listen port, public key, and all configured drop-in addresses.
+3. On pass, `iota-boot-health` commits `pending` → `current`, allowing `systemd-bless-boot.service` to bless the OS slot.
+4. On fail, `iota-boot-health` reboots **only** if `pending` site config (`site_mode=pending`) or an unblessed OS slot (`indeterminate`) is being trialed; on an already-blessed slot with no pending site config, it logs the error without rebooting so an isolated host does not reboot-loop.
+
+Available subcommands: `/usr/libexec/iota-site {stage|commit|rollback|status}`.
+
+> [!NOTE]
+> Rollbacks revert topology (Tier 2) and pending site data (Tier 3), not identity keys (Tier 1). The WireGuard private key stays in `/var/lib/credstore.encrypted`. If a node rotates its key (`--rotate`), its peers need a release that contains the new public key, and rolling a peer back to an older release resurrects the old public key for that node from the older image.
+
+### 6. Provisioning Without a Private Release Channel (Hetzner & QEMU)
+
+Per-host SSH authorization and secrets stay out of the public image and release artifacts:
+
+1. **Hetzner Rescue System + ESP credentials (`/loader/credentials/`):**
+   Boot the Hetzner server into the Rescue System, write the decompressed raw disk image to the target block device, mount the ESP (partition 1), and drop `.cred` files into `<ESP>/loader/credentials/`:
+   - `ssh.authorized_keys.root.cred` (imported automatically by `systemd-stub` and written by `/usr/lib/tmpfiles.d/provision.conf` to `/root/.ssh/authorized_keys`, which resolves to persistent `/var/roothome/.ssh/authorized_keys` labeled `ssh_home_t`).
+   - Optionally `passwd.hashed-password.root.cred` for root console login.
+   Unmount, reboot out of Rescue Mode, then run `/usr/libexec/iota-wg-provision` via SSH or the Hetzner web console.
+2. **Hetzner Cloud `cloud-init` user-data:**
+   Hetzner's cloud metadata service (`169.254.169.254` / `cidata`) targets images shipping Python `cloud-init`, which this minimal image intentionally omits. Using Rescue Mode + ESP `/loader/credentials/*.cred` (or the Hetzner web console to stage credentials once onto `/root/.ssh/authorized_keys` or `/var/lib/credstore.encrypted`) keeps provisioning simple without pulling `cloud-init` and Python dependencies into the image.
+3. **QEMU / CI (`SMBIOS type=11`):**
+   Pass credentials directly via QEMU SMBIOS OEM strings without modifying the disk image:
+   ```bash
+   KEY_B64=$(base64 -w0 ~/.ssh/id_ed25519.pub)
+   -smbios "type=11,value=io.systemd.credential.binary:ssh.authorized_keys.root=${KEY_B64}"
+   ```
+
+### 7. Why In-Image Config Over `confext` (`systemd 262.2` Evaluation)
+
+Shipping fleet policy directly in dm-verity `/usr` was chosen over `systemd-confext` after inspecting `systemd 262.2` and `systemd-stub` in the built image:
+
+1. **Initrd-only `.extra.d` scope:** `systemd-stub` (262) strips `+tries-done` suffixes (`foo+3-0.efi` → `foo.efi.extra.d/`) and unpacks `*.confext.raw` into `/.extra/confext/`, which is consumed by `systemd-confext-initrd.service`. That unit has `Conflicts=initrd-switch-root.target` (unmerging at switch-root), whereas `systemd-confext-sysroot.service` and real-root `systemd-confext.service` only read `/var/lib/confexts`, `/usr/local/lib/confexts`, `/usr/lib/confexts`, and `/run/confexts` — not `/.extra/confext/`.
+2. **No automatic rollback for decoupled `confext` updates:** Once a UKI is blessed (`foo.efi`), updating a `.confext.raw` independently does not trigger `systemd-boot` boot counting or fallback unless you also re-arm UKI boot counting or build a parallel confext boot counter and OS-version compatibility validation.
+3. **`systemd-sysupdate` path constraints:** `[Target] Path=` in `sysupdate.d(5)` is static and cannot interpolate `@v` into a parent directory such as `/EFI/Linux/iota_@v_x86-64.efi.extra.d/`.
+4. **Unnecessary layer complexity:** In-image `/usr/lib/` already gets dm-verity + A/B UKI rollback with zero extra overlay layers or SELinux/signing pipelines.
+
 
 ---
 
@@ -189,12 +266,12 @@ After rebooting into the updated slot:
 bootctl status
 ```
 
-If a new UKI fails to reach `boot-complete.target` before its 3 boot tries expire, `systemd-boot` automatically falls back to the previous slot while preserving `/var` and the `/etc` overlay.
+If a new UKI fails to reach `boot-complete.target` before its 3 boot tries expire, `systemd-boot` automatically falls back to the previous slot while keeping Tier 1 identity on `/var` and resetting `/etc` cleanly from the image + active site generation.
 
 ---
 
 ## CI/CD Workflows
 
-- **Verify (`ci.yml`):** Runs on pull requests and manual dispatch. Builds `1.0.0` and `1.0.1`, resizes the disk by `+6G`, boots `1.0.0` in QEMU/OVMF, validates `systemd-repart`, `_empty` Slot B, `/var`, `/etc` overlay, and SELinux `Enforcing`, serves `1.0.1` over HTTP, runs `systemd-sysupdate update --verify=no`, reboots into Slot B (`iota_1.0.1`), verifies `systemd-bless-boot` and state persistence, and simulates a failed boot (`+1-0`) to confirm automatic rollback to `iota_1.0.0`.
+- **Verify (`ci.yml`):** Runs on pull requests and manual dispatch. Builds `1.0.0`, `1.0.1`, and bad-fleet-policy `1.0.2`; resizes the disk by `+6G`; boots `1.0.0` in QEMU/OVMF; validates `systemd-repart`, `_empty` Slot B, `/var`, volatile `/etc` overlay (`upperdir=/run/.etc-overlay/upper`), Tier 1 identity (`machine-id`, `/var/lib/ssh` host key, encrypted WireGuard key), and SELinux `Enforcing`; verifies `wg0` stays inert unprovisioned then comes up after `iota-wg-provision`; updates to `1.0.1`, verifies `systemd-bless-boot` and that non-allowlisted `/etc` writes do not persist across reboot; verifies bad pending site data rolls back to `current`; and updates to `1.0.2` (with an egress-blocking firewall policy) to verify `iota-boot-health` rejects blessing and `systemd-boot` rolls back to `iota_1.0.1`.
 - **Build & Release (`build.yml`):** Runs on pushes to `main`, `workflow_dispatch`, or calls from `shell.yml`. Runs `ci.yml`, builds date-versioned artifacts (`YYYYMMDD` / `YYYYMMDD.N`), signs `SHA256SUMS` with GPG, and publishes a GitHub Release.
 - **Update Check (`shell.yml`):** On `workflow_dispatch`, downloads the latest released root partition image, mounts it, and runs `dnf check-update` against `/usr/lib/sysimage/rpm/rpmdb.sqlite` inside an `almalinux` container. If package updates are available, it invokes `build.yml` with generated package diff release notes.

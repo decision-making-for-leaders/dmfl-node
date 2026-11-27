@@ -1,0 +1,277 @@
+#!/bin/sh
+# Manage Tier 3 per-host site data generations (/var/lib/iota/site).
+#
+#   iota-site stage [--wg-address <addr/prefix>] [--hostname <name>]
+#                   [--tries <N>] [--no-validate] [--force]
+#   iota-site commit
+#   iota-site rollback
+#   iota-site status
+set -eu
+
+SITE_DIR=/var/lib/iota/site
+GENS_DIR="$SITE_DIR/gens"
+RUN_DIR=/run/iota-site
+WG_DROPIN=/etc/systemd/network/50-wg0.network.d/10-address.conf
+
+usage() {
+    cat >&2 <<'EOF'
+Usage:
+  iota-site stage [--wg-address <addr/prefix>] [--hostname <name>] [--tries <N>] [--no-validate] [--force]
+  iota-site commit
+  iota-site rollback
+  iota-site status
+EOF
+    exit 2
+}
+
+require_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "error: must be run as root" >&2
+        exit 1
+    fi
+}
+
+now_utc() {
+    date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown"
+}
+
+validate_wg_address() {
+    addr=$1
+    case "$addr" in
+        */*) ;;
+        *) echo "error: --wg-address must include prefix length (e.g. 10.100.0.3/24)" >&2; exit 2 ;;
+    esac
+    ip=${addr%/*}
+    prefix=${addr#*/}
+    case "$prefix" in
+        ''|*[!0-9]*) echo "error: invalid prefix length '$prefix'" >&2; exit 2 ;;
+    esac
+    case "$ip" in
+        */*) echo "error: multiple '/' in '$addr'" >&2; exit 2 ;;
+        *:*)
+            if [ "$prefix" -gt 128 ]; then
+                echo "error: IPv6 prefix out of range: $prefix" >&2
+                exit 2
+            fi
+            case "$ip" in
+                *[!0-9A-Fa-f:]*) echo "error: invalid IPv6 address '$ip'" >&2; exit 2 ;;
+            esac
+            ;;
+        *)
+            case "$ip" in
+                *[!0-9.]*) echo "error: invalid IPv4 address '$ip'" >&2; exit 2 ;;
+            esac
+            if [ "$prefix" -gt 32 ]; then
+                echo "error: IPv4 prefix out of range: $prefix" >&2
+                exit 2
+            fi
+            old_ifs=$IFS
+            IFS=.
+            set -- $ip
+            IFS=$old_ifs
+            if [ $# -ne 4 ]; then
+                echo "error: invalid IPv4 address '$ip'" >&2
+                exit 2
+            fi
+            for oct in "$@"; do
+                case "$oct" in
+                    ''|*[!0-9]*) echo "error: invalid IPv4 octet '$oct'" >&2; exit 2 ;;
+                esac
+                if [ "$oct" -gt 255 ]; then
+                    echo "error: IPv4 octet out of range: $oct" >&2
+                    exit 2
+                fi
+            done
+            ;;
+    esac
+}
+
+validate_hostname() {
+    hn=$1
+    [ -n "$hn" ] || { echo "error: hostname cannot be empty" >&2; exit 2; }
+    [ "${#hn}" -le 253 ] || { echo "error: hostname too long" >&2; exit 2; }
+    case "$hn" in
+        *[!A-Za-z0-9.-]*|-*|*-|.*|*.)
+            echo "error: invalid hostname '$hn'" >&2
+            exit 2
+            ;;
+    esac
+}
+
+cmd_stage() {
+    require_root
+    wg_addr=
+    hostname_val=
+    tries=3
+    validate=yes
+    force=no
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --wg-address)
+                [ $# -ge 2 ] || usage
+                wg_addr=$2
+                shift 2
+                ;;
+            --hostname)
+                [ $# -ge 2 ] || usage
+                hostname_val=$2
+                shift 2
+                ;;
+            --tries)
+                [ $# -ge 2 ] || usage
+                tries=$2
+                shift 2
+                ;;
+            --no-validate)
+                validate=no
+                shift
+                ;;
+            --force)
+                force=yes
+                shift
+                ;;
+            *)
+                usage
+                ;;
+        esac
+    done
+
+    if [ -z "$wg_addr" ] && [ -z "$hostname_val" ]; then
+        echo "error: stage requires --wg-address and/or --hostname" >&2
+        exit 2
+    fi
+
+    case "$tries" in
+        ''|*[!0-9]*) echo "error: --tries must be a positive integer" >&2; exit 2 ;;
+    esac
+    if [ "$tries" -lt 1 ]; then
+        echo "error: --tries must be >= 1" >&2
+        exit 2
+    fi
+
+    if [ "$force" = no ] && [ -x /usr/lib/systemd/systemd-bless-boot ]; then
+        bless_status=$(/usr/lib/systemd/systemd-bless-boot status 2>/dev/null || true)
+        if [ "$bless_status" = "indeterminate" ]; then
+            echo "error: OS slot is unblessed (indeterminate); refusing to stage site config without --force" >&2
+            exit 1
+        fi
+    fi
+
+    if [ "$validate" = yes ]; then
+        [ -z "$wg_addr" ] || validate_wg_address "$wg_addr"
+        [ -z "$hostname_val" ] || validate_hostname "$hostname_val"
+    fi
+
+    mkdir -p "$GENS_DIR"
+
+    max_gen=0
+    for d in "$GENS_DIR"/*; do
+        [ -d "$d" ] || continue
+        base=${d##*/}
+        case "$base" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if [ "$base" -gt "$max_gen" ]; then
+            max_gen=$base
+        fi
+    done
+    next_gen=$((max_gen + 1))
+    next_dir="$GENS_DIR/$next_gen"
+    mkdir -p "$next_dir"
+
+    if [ -d "$SITE_DIR/current" ]; then
+        for f in wg0-address.conf hostname; do
+            if [ -f "$SITE_DIR/current/$f" ]; then
+                cp -f "$SITE_DIR/current/$f" "$next_dir/$f"
+            fi
+        done
+    fi
+
+    if [ -n "$wg_addr" ]; then
+        printf '# Written by iota-site. Per-host wg0 address.\n[Network]\nAddress=%s\n' \
+            "$wg_addr" > "$next_dir/wg0-address.conf"
+        chmod 0644 "$next_dir/wg0-address.conf"
+    fi
+
+    if [ -n "$hostname_val" ]; then
+        printf '%s\n' "$hostname_val" > "$next_dir/hostname"
+        chmod 0644 "$next_dir/hostname"
+    fi
+
+    tmp_tries="$SITE_DIR/pending.tries.tmp.$$"
+    printf '%s\n' "$tries" > "$tmp_tries"
+    sync
+    mv -f "$tmp_tries" "$SITE_DIR/pending.tries"
+    ln -sfn "gens/$next_gen" "$SITE_DIR/pending"
+    sync
+
+    echo "Staged site generation gens/$next_gen as pending (tries=$tries)."
+}
+
+cmd_commit() {
+    require_root
+    if [ ! -L "$SITE_DIR/pending" ] || [ ! -d "$SITE_DIR/pending" ]; then
+        echo "error: no pending site generation to commit" >&2
+        exit 1
+    fi
+    target=$(readlink "$SITE_DIR/pending")
+    ln -sfn "$target" "$SITE_DIR/current"
+    rm -f "$SITE_DIR/pending" "$SITE_DIR/pending.tries"
+    sync
+
+    if [ -d "$RUN_DIR" ]; then
+        printf 'current\n' > "$RUN_DIR/mode"
+        printf '%s\n' "$(basename "$target")" > "$RUN_DIR/active-gen"
+        rm -f "$RUN_DIR/tries-left"
+    fi
+
+    echo "Committed site generation $target as current."
+}
+
+cmd_rollback() {
+    require_root
+    if [ -L "$SITE_DIR/pending" ]; then
+        failed_gen=$(basename "$(readlink "$SITE_DIR/pending")")
+        printf '%s manual-rollback (%s)\n' "$failed_gen" "$(now_utc)" > "$SITE_DIR/last-failed"
+    fi
+    rm -f "$SITE_DIR/pending" "$SITE_DIR/pending.tries"
+    sync
+
+    rm -f "$WG_DROPIN"
+    /usr/libexec/iota-site-apply
+    systemctl restart systemd-networkd.service
+    echo "Rolled back pending site generation to current."
+}
+
+cmd_status() {
+    cur=$(readlink "$SITE_DIR/current" 2>/dev/null || echo "(none)")
+    pend=$(readlink "$SITE_DIR/pending" 2>/dev/null || echo "(none)")
+    tries=$(cat "$SITE_DIR/pending.tries" 2>/dev/null || echo "(none)")
+    last_failed=$(cat "$SITE_DIR/last-failed" 2>/dev/null || echo "(none)")
+    run_mode=$(cat "$RUN_DIR/mode" 2>/dev/null || echo "(none)")
+    run_gen=$(cat "$RUN_DIR/active-gen" 2>/dev/null || echo "(none)")
+    run_tries=$(cat "$RUN_DIR/tries-left" 2>/dev/null || echo "(none)")
+
+    cat <<EOF
+current: $cur
+pending: $pend
+pending.tries: $tries
+last-failed: $last_failed
+run.mode: $run_mode
+run.active-gen: $run_gen
+run.tries-left: $run_tries
+EOF
+}
+
+[ $# -ge 1 ] || usage
+subcmd=$1
+shift
+
+case "$subcmd" in
+    stage) cmd_stage "$@" ;;
+    commit) [ $# -eq 0 ] || usage; cmd_commit ;;
+    rollback) [ $# -eq 0 ] || usage; cmd_rollback ;;
+    status) [ $# -eq 0 ] || usage; cmd_status ;;
+    *) usage ;;
+esac

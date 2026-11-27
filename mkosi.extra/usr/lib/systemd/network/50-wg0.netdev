@@ -1,0 +1,44 @@
+# WireGuard mesh topology — baked into the dm-verity root image.
+#
+# This file is PUBLIC: it ships inside the GitHub Release artifacts. It must
+# only contain topology (public keys, endpoints, AllowedIPs), never secrets.
+# Because it lives in /usr, it is A/B-versioned with the rest of the image and
+# rolls back with systemd-boot / systemd-bless-boot.
+#
+# The per-host private key is provided as an encrypted systemd credential at
+#   /etc/credstore.encrypted/network.wireguard.private.wg0
+# (persisted on /var via the /etc overlay). systemd-networkd.service already
+# ships ImportCredential=network.wireguard.*, so no unit drop-in is needed.
+# Provision a host with: /usr/libexec/iota-wg-provision <address>/<prefix>
+#
+# Hosts without that credential never create wg0 (see [Match] below), so this
+# file is inert until a host has been provisioned.
+
+[Match]
+Credential=network.wireguard.private.wg0
+
+[NetDev]
+Name=wg0
+Kind=wireguard
+Description=Iota WireGuard mesh
+
+[WireGuard]
+PrivateKey=@network.wireguard.private.wg0
+ListenPort=51820
+
+# One [WireGuardPeer] section per node. It is safe to list *every* node here,
+# including the local one: the kernel silently ignores a peer whose public key
+# matches the interface's own key, so the same full-mesh list works on all
+# hosts. Get a node's public key from the output of iota-wg-provision.
+#
+#[WireGuardPeer]
+#PublicKey=<node-a public key>
+#AllowedIPs=10.100.0.1/32
+#Endpoint=node-a.example.com:51820
+#PersistentKeepalive=25
+#
+#[WireGuardPeer]
+#PublicKey=<node-b public key>
+#AllowedIPs=10.100.0.2/32
+#Endpoint=node-b.example.com:51820
+#PersistentKeepalive=25

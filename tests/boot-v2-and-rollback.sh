@@ -50,10 +50,19 @@ test "$BOOTED_VER" = "1.0.1"
 # Verify /dev/mapper/root is backed by the iota_1.0.1 partition (Slot B)
 ssh_guest "lsblk -s -no PARTLABEL /dev/mapper/root | grep -qx iota_1.0.1"
 
-# Verify persistent /var and /etc overlay survived the A -> B slot switch
+# Phase 1: Verify persistent /var, stateless volatile /etc, and Tier 1 identity across A -> B switch
 verify_mounts_and_selinux
 ssh_guest 'test "$(cat /var/lib/persist-test)" = "var-persisted-from-1.0.0"'
-ssh_guest 'test "$(cat /etc/persist-etc-test)" = "etc-persisted-from-1.0.0"'
+ssh_guest 'test ! -e /etc/ephemeral-etc-test'
+test "$(ssh_guest 'cat /etc/machine-id')" = "$(cat /tmp/machine-id-v100.txt)"
+test "$(ssh_guest 'cat /var/lib/ssh/ssh_host_ed25519_key.pub')" = "$(cat /tmp/ssh-hostkey-v100.txt)"
+ssh_guest '! ls /etc/ssh/ssh_host_* >/dev/null 2>&1'
+
+# Verify wg0 comes up on the new slot: topology from the 1.0.1 image, private
+# key + address from persistent Tier 1 / Tier 3 state provisioned on 1.0.0.
+wait_wg0 10.100.0.10/24
+test "$(ssh_guest 'wg show wg0 public-key')" = "$(cat /tmp/wg0-pubkey-v100.txt)"
+wait_boot_health
 
 # Verify systemd-boot decremented +3-0 -> +2-1 and systemd-bless-boot marks it good
 if ! verify_bless_boot; then
@@ -73,35 +82,78 @@ if ! verify_bless_boot; then
   exit 1
 fi
 
-# Simulate a bad update with 1 try remaining that reboots before boot-complete.target
-ssh_guest 'ESP_DIR=$(bootctl --print-esp-path) && mv "$ESP_DIR/EFI/Linux/iota_1.0.1_x86-64.efi" "$ESP_DIR/EFI/Linux/iota_1.0.1_x86-64+1-0.efi"'
-ssh_guest 'set -euo pipefail
-mkdir -p /etc/systemd/system/systemd-bless-boot.service.d
-cat > /etc/systemd/system/systemd-bless-boot.service.d/simulate-bad-update.conf <<'\''EOF'\''
-[Unit]
-ConditionOSRelease=IMAGE_VERSION=1.0.1
-Before=sshd.service multi-user.target
-FailureAction=reboot-force
-
-[Service]
-ExecStart=
-ExecStart=/usr/bin/false
-EOF
-sync'
-
-echo "Rebooting into simulated bad v1.0.1 (+1-0) to verify automatic fallback to v1.0.0..."
-# Mark where the rollback boot output starts so failures can be located in the serial log
-echo "=== CI: issuing reboot into simulated bad v1.0.1 ===" >> /tmp/serial-boot2.log
+# Phase 2: Bad site data (invalid tunnel address) in a pending generation falls back to current
+ssh_guest '/usr/libexec/iota-site stage --wg-address 10.100.0.999/24 --tries 1 --no-validate'
+echo "Rebooting into bad pending site generation to verify automatic fallback to current..."
+LINE=$(wc -l < /tmp/serial-boot2.log)
+echo "=== CI: Phase 2 bad site data reboot ===" >> /tmp/serial-boot2.log
 ssh_guest "touch /run/awaiting-rollback && systemctl reboot" || true
-
 for _ in {1..30}; do
   ssh_guest "test -f /run/awaiting-rollback" 2>/dev/null || break
   sleep 1
 done
+
 if [ "${SSH_VAR_LUKS:-false}" = "true" ]; then
-  echo "Unlocking /var via initrd SSH for doomed v1.0.1 (+1-0)..."
+  echo "Unlocking /var via initrd SSH for bad site config trial..."
   unlock_var_ssh 45 /tmp/serial-boot2.log "$LUKS_PASSPHRASE"
-  echo "Unlocking /var via initrd SSH for rolled-back v1.0.0..."
+fi
+wait_for_serial_pattern /tmp/serial-boot2.log "$LINE" 'iota-boot-health: FAIL on pending site config' 120
+LINE=$(wc -l < /tmp/serial-boot2.log)
+wait_for_serial_pattern /tmp/serial-boot2.log "$LINE" 'Linux version' 45
+LINE=$(wc -l < /tmp/serial-boot2.log)
+
+if [ "${SSH_VAR_LUKS:-false}" = "true" ]; then
+  echo "Unlocking /var via initrd SSH after site-data fallback..."
+  unlock_var_ssh 45 /tmp/serial-boot2.log "$LUKS_PASSPHRASE"
+fi
+if ! wait_ssh 60 /tmp/serial-boot2.log; then
+  capture_serial_diagnostics /tmp/serial-boot2.sock /tmp/guest-diag-boot2.txt
+  exit 1
+fi
+
+test "$(ssh_guest '. /usr/lib/os-release && echo $IMAGE_VERSION')" = "1.0.1"
+wait_boot_health
+ssh_guest '
+  set -euo pipefail
+  status=$(/usr/libexec/iota-site status)
+  echo "$status"
+  echo "$status" | grep -qx "current: gens/1"
+  echo "$status" | grep -qx "pending: (none)"
+  echo "$status" | grep -qE "^last-failed: 2 exhausted"
+'
+wait_wg0 10.100.0.10/24
+test "$(ssh_guest 'wg show wg0 public-key')" = "$(cat /tmp/wg0-pubkey-v100.txt)"
+
+# Phase 3: Bad fleet policy in v1.0.2 fails health gate and rolls back to v1.0.1
+rm -f /tmp/update-srv/*
+cp /tmp/update-srv-v102/* /tmp/update-srv/
+ssh_guest "/usr/lib/systemd/systemd-sysupdate update --verify=no"
+ssh_guest "blkid -t PARTLABEL=iota_1.0.2"
+ssh_guest "blkid -t PARTLABEL=iota_1.0.2_verity"
+ssh_guest 'ESP_DIR=$(bootctl --print-esp-path) && test -f "$ESP_DIR/EFI/Linux/iota_1.0.2_x86-64+3-0.efi"'
+
+echo "Rebooting into bad fleet policy v1.0.2 (+3-0) to verify health-gated slot rollback to v1.0.1..."
+LINE=$(wc -l < /tmp/serial-boot2.log)
+echo "=== CI: Phase 3 bad fleet policy v1.0.2 reboot ===" >> /tmp/serial-boot2.log
+ssh_guest "touch /run/awaiting-rollback && systemctl reboot" || true
+for _ in {1..30}; do
+  ssh_guest "test -f /run/awaiting-rollback" 2>/dev/null || break
+  sleep 1
+done
+
+for try in 1 2 3; do
+  if [ "${SSH_VAR_LUKS:-false}" = "true" ]; then
+    echo "Unlocking /var via initrd SSH for doomed v1.0.2 try $try..."
+    unlock_var_ssh 45 /tmp/serial-boot2.log "$LUKS_PASSPHRASE"
+  fi
+  wait_for_serial_pattern /tmp/serial-boot2.log "$LINE" 'iota-boot-health: FAIL on unblessed OS slot' 120
+  LINE=$(wc -l < /tmp/serial-boot2.log)
+  wait_for_serial_pattern /tmp/serial-boot2.log "$LINE" 'Linux version' 45
+  LINE=$(wc -l < /tmp/serial-boot2.log)
+done
+
+if [ "${SSH_VAR_LUKS:-false}" = "true" ]; then
+  echo "Unlocking /var via initrd SSH for rolled-back v1.0.1..."
   unlock_var_ssh 45 /tmp/serial-boot2.log "$LUKS_PASSPHRASE"
 fi
 if ! wait_ssh 75 /tmp/serial-boot2.log; then
@@ -111,15 +163,17 @@ fi
 
 ROLLBACK_VER=$(ssh_guest ". /usr/lib/os-release && echo \$IMAGE_VERSION")
 echo "Rolled-back Booted Version: $ROLLBACK_VER"
-test "$ROLLBACK_VER" = "1.0.0"
+test "$ROLLBACK_VER" = "1.0.1"
 
-# Verify fallback booted Slot A (iota_1.0.0), v1.0.1 exhausted tries (+0-1), and state stayed intact
-ssh_guest "lsblk -s -no PARTLABEL /dev/mapper/root | grep -qx iota_1.0.0"
-ssh_guest 'ESP_DIR=$(bootctl --print-esp-path) && ls -la "$ESP_DIR/EFI/Linux/" && test -f "$ESP_DIR/EFI/Linux/iota_1.0.1_x86-64+0-1.efi"'
+# Verify fallback booted Slot B (iota_1.0.1), v1.0.2 exhausted tries (+0-3), and state stayed intact
+ssh_guest "lsblk -s -no PARTLABEL /dev/mapper/root | grep -qx iota_1.0.1"
+ssh_guest 'ESP_DIR=$(bootctl --print-esp-path) && ls -la "$ESP_DIR/EFI/Linux/" && test -f "$ESP_DIR/EFI/Linux/iota_1.0.2_x86-64+0-3.efi"'
+verify_mounts_and_selinux
 ssh_guest 'test "$(cat /var/lib/persist-test)" = "var-persisted-from-1.0.0"'
-ssh_guest 'test "$(cat /etc/persist-etc-test)" = "etc-persisted-from-1.0.0"'
-
-# Clean up the simulated bad-update drop-in from the persistent /etc overlay
-ssh_guest "rm -f /etc/systemd/system/systemd-bless-boot.service.d/simulate-bad-update.conf && rmdir --ignore-fail-on-non-empty /etc/systemd/system/systemd-bless-boot.service.d && systemctl daemon-reload"
+test "$(ssh_guest 'cat /etc/machine-id')" = "$(cat /tmp/machine-id-v100.txt)"
+test "$(ssh_guest 'cat /var/lib/ssh/ssh_host_ed25519_key.pub')" = "$(cat /tmp/ssh-hostkey-v100.txt)"
+wait_wg0 10.100.0.10/24
+test "$(ssh_guest 'wg show wg0 public-key')" = "$(cat /tmp/wg0-pubkey-v100.txt)"
+wait_boot_health
 
 poweroff_guest "$QEMU_PID"
