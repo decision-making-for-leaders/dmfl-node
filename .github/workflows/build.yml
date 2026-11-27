@@ -106,6 +106,21 @@ jobs:
         run: |
           mkosi summary
 
+      - name: Setup Verity Signing Keys
+        env:
+          VERITY_PRIVATE_KEY: ${{ secrets.VERITY_PRIVATE_KEY }}
+          VERITY_CERTIFICATE: ${{ secrets.VERITY_CERTIFICATE }}
+        run: |
+          if [ -n "$VERITY_PRIVATE_KEY" ] && [ -n "$VERITY_CERTIFICATE" ]; then
+            umask 0077
+            printf '%s\n' "$VERITY_PRIVATE_KEY" > mkosi.key
+            umask 0022
+            printf '%s\n' "$VERITY_CERTIFICATE" > mkosi.crt
+          else
+            echo "::warning::VERITY_PRIVATE_KEY/VERITY_CERTIFICATE secrets not set; generating ephemeral key pair with mkosi genkey"
+            mkosi genkey
+          fi
+
       - name: Build Images
         run: |
           sudo mkosi build --force

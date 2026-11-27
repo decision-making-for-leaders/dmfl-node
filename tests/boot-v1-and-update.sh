@@ -35,7 +35,9 @@ ssh_guest '
 
 # 2. Verify the partition table actually has the '_empty' B slots and /var
 ssh_guest "lsblk -o NAME,PARTLABEL,PARTTYPE,PARTUUID,SIZE"
+ssh_guest "blkid -t PARTLABEL=iota_1.0.0_verity_sig"
 ssh_guest "blkid -t PARTLABEL=_empty"
+ssh_guest 'test "$(lsblk -rn -o PARTLABEL | grep -cx _empty)" -eq 3'
 
 # 3. Verify persistent /var and /etc overlay are mounted and write test markers
 verify_mounts_and_selinux
@@ -52,6 +54,7 @@ ssh_guest "/usr/lib/systemd/systemd-sysupdate list --verify=no"
 # 5. Run the update and verify '_empty' became 'iota_1.0.1' and boot-counted UKI exists
 ssh_guest "/usr/lib/systemd/systemd-sysupdate update --verify=no"
 ssh_guest "lsblk -o NAME,PARTLABEL,PARTUUID,SIZE"
+ssh_guest "blkid -t PARTLABEL=iota_1.0.1_verity_sig"
 ssh_guest 'ESP_DIR=$(bootctl --print-esp-path) && ls -la "$ESP_DIR/EFI/Linux/" && test -f "$ESP_DIR/EFI/Linux/iota_1.0.1_x86-64+3-0.efi"'
 
 # Power off cleanly so filesystems and EFI vars flush

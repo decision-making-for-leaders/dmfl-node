@@ -15,6 +15,10 @@ if [ -n "${GITHUB_ENV:-}" ]; then
   } >> "$GITHUB_ENV"
 fi
 
+if [ ! -f mkosi.key ] || [ ! -f mkosi.crt ]; then
+  mkosi genkey
+fi
+
 ssh-keygen -t ed25519 -f /tmp/ci_id_ed25519 -N ""
 mkdir -p mkosi.extra/etc/ssh/sshd_config.d
 cp /tmp/ci_id_ed25519.pub mkosi.extra/etc/ssh/authorized_keys

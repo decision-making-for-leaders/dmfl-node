@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/lib.sh"
 sudo rm -rf mkosi.output/*
 sudo mkosi --image-version=1.0.1 --force build
 sudo chown -R "$USER:$USER" mkosi.output
+test -n "$(find mkosi.output -maxdepth 1 -name 'iota_1.0.1_x86-64.root-x86-64-verity-sig.*.raw.zst' -print -quit)"
 
 {
   echo "==== [v1.0.1] build output ===="
