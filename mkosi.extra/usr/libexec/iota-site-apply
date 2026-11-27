@@ -1,0 +1,104 @@
+#!/bin/sh
+# Apply active or pending Tier 3 site configuration into volatile /etc.
+# Runs before systemd-networkd.service and systemd-hostnamed.service.
+set -eu
+
+SITE_DIR=/var/lib/iota/site
+RUN_DIR=/run/iota-site
+WG_DROPIN_DIR=/etc/systemd/network/50-wg0.network.d
+WG_DROPIN="$WG_DROPIN_DIR/10-address.conf"
+
+mkdir -p "$SITE_DIR/gens" "$RUN_DIR"
+
+now_utc() {
+    date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown"
+}
+
+mode=none
+active_dir=
+active_gen=
+tries_left=
+
+if [ -L "$SITE_DIR/pending" ]; then
+    if [ ! -d "$SITE_DIR/pending" ]; then
+        printf '%s dangling-pending (%s)\n' "$(basename "$(readlink "$SITE_DIR/pending")")" "$(now_utc)" \
+            > "$SITE_DIR/last-failed"
+        rm -f "$SITE_DIR/pending" "$SITE_DIR/pending.tries"
+        sync
+    else
+        tries=0
+        if [ -r "$SITE_DIR/pending.tries" ]; then
+            IFS= read -r raw_tries < "$SITE_DIR/pending.tries" || raw_tries=
+            case "$raw_tries" in
+                ''|*[!0-9]*) tries=0 ;;
+                *) tries=$raw_tries ;;
+            esac
+        fi
+
+        if [ "$tries" -gt 0 ]; then
+            next=$((tries - 1))
+            tmp_tries="$SITE_DIR/pending.tries.tmp.$$"
+            printf '%s\n' "$next" > "$tmp_tries"
+            sync
+            mv -f "$tmp_tries" "$SITE_DIR/pending.tries"
+            sync
+
+            mode=pending
+            active_dir="$SITE_DIR/pending"
+            active_gen=$(basename "$(readlink "$SITE_DIR/pending")")
+            tries_left=$next
+        else
+            failed_gen=$(basename "$(readlink "$SITE_DIR/pending")")
+            printf '%s exhausted (%s)\n' "$failed_gen" "$(now_utc)" > "$SITE_DIR/last-failed"
+            rm -f "$SITE_DIR/pending" "$SITE_DIR/pending.tries"
+            sync
+
+            if [ -d "$SITE_DIR/current" ]; then
+                mode=fallback
+                active_dir="$SITE_DIR/current"
+                active_gen=$(basename "$(readlink "$SITE_DIR/current")")
+            fi
+        fi
+    fi
+elif [ -d "$SITE_DIR/current" ]; then
+    mode=current
+    active_dir="$SITE_DIR/current"
+    active_gen=$(basename "$(readlink "$SITE_DIR/current")")
+fi
+
+printf '%s\n' "$mode" > "$RUN_DIR/mode"
+if [ -n "$active_gen" ]; then
+    printf '%s\n' "$active_gen" > "$RUN_DIR/active-gen"
+else
+    rm -f "$RUN_DIR/active-gen"
+fi
+if [ -n "$tries_left" ]; then
+    printf '%s\n' "$tries_left" > "$RUN_DIR/tries-left"
+else
+    rm -f "$RUN_DIR/tries-left"
+fi
+
+rm -f "$WG_DROPIN"
+
+if [ -n "$active_dir" ]; then
+    if [ -f "$active_dir/wg0-address.conf" ]; then
+        mkdir -p "$WG_DROPIN_DIR"
+        cp -f "$active_dir/wg0-address.conf" "$WG_DROPIN"
+        chmod 0644 "$WG_DROPIN"
+        if command -v restorecon >/dev/null 2>&1; then
+            restorecon -R "$WG_DROPIN_DIR" 2>/dev/null || true
+        fi
+    fi
+
+    if [ -s "$active_dir/hostname" ]; then
+        cp -f "$active_dir/hostname" /etc/hostname
+        chmod 0644 /etc/hostname
+        if command -v restorecon >/dev/null 2>&1; then
+            restorecon /etc/hostname 2>/dev/null || true
+        fi
+        IFS= read -r hn < "$active_dir/hostname" || hn=
+        if [ -n "$hn" ] && [ -w /proc/sys/kernel/hostname ]; then
+            printf '%s' "$hn" > /proc/sys/kernel/hostname
+        fi
+    fi
+fi

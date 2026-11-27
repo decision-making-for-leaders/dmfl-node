@@ -1,7 +1,8 @@
 # Shared wg0 network settings — baked into the image (see 50-wg0.netdev).
 #
-# The tunnel address is per host and is NOT set here. It is supplied by a
-# drop-in on the persistent /etc overlay, written by iota-wg-provision:
+# The tunnel address is per host (Tier 3 site data) and is NOT set here.
+# It is managed under /var/lib/iota/site/ with generational trial/commit
+# and staged at boot by iota-site-apply into volatile /etc:
 #   /etc/systemd/network/50-wg0.network.d/10-address.conf
 #     [Network]
 #     Address=10.100.0.X/24

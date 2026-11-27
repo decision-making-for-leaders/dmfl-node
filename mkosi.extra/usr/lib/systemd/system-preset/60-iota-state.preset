@@ -1,3 +1,4 @@
 enable iota-ssh-hostkeys.service
+enable iota-site-apply.service
 disable sshd-keygen.service
 disable sshd-keygen.target

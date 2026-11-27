@@ -1,38 +1,45 @@
 #!/bin/sh
-# Provision this host's per-host WireGuard state for the image-baked wg0.
+# Provision this host's per-host WireGuard identity and site tunnel address.
 #
-#   iota-wg-provision <address>/<prefix> [--rotate]
+#   iota-wg-provision <address>/<prefix> [--rotate] [--stage]
 #
-# - Generates a private key (once) and stores it as an encrypted systemd
-#   credential in /etc/credstore.encrypted (bound to TPM2 + host key if a
-#   TPM2 is present, otherwise to /var/lib/systemd/credential.secret).
-# - Writes the per-host tunnel address as a drop-in for 50-wg0.network.
-# - Restarts systemd-networkd so it imports the credential and creates wg0.
+# - Tier 1 (Identity): generates a private key (once) and stores it as an
+#   encrypted systemd credential in /etc/credstore.encrypted (bind-mounted from
+#   /var/lib/credstore.encrypted, bound to TPM2 + host key if TPM2 is present,
+#   otherwise to /var/lib/systemd/credential.secret). Never rolled back.
+# - Tier 3 (Site data): manages the per-host tunnel address in
+#   /var/lib/iota/site/ via iota-site. First-time bootstrap commits and applies
+#   immediately; subsequent address changes are staged as a pending generation
+#   with a tries counter for trial/commit across reboot.
 # - Prints the public key to add as a [WireGuardPeer] in 50-wg0.netdev.
-#
-# Everything written lives under /etc (overlay upper on /var), so it survives
-# A/B updates and rollbacks; the topology itself stays in the image.
 set -eu
 
 CRED_NAME=network.wireguard.private.wg0
 CRED_DIR=/etc/credstore.encrypted
 CRED="$CRED_DIR/$CRED_NAME"
-DROPIN_DIR=/etc/systemd/network/50-wg0.network.d
-DROPIN="$DROPIN_DIR/10-address.conf"
+SITE_CURRENT=/var/lib/iota/site/current
 
 usage() {
-    echo "Usage: $0 <address>/<prefix> [--rotate]" >&2
+    echo "Usage: $0 <address>/<prefix> [--rotate] [--stage]" >&2
     echo "Example: $0 10.100.0.3/24" >&2
     exit 2
 }
 
-[ $# -ge 1 ] && [ $# -le 2 ] || usage
-addr=$1
+addr=
 rotate=no
-if [ $# -eq 2 ]; then
-    [ "$2" = "--rotate" ] || usage
-    rotate=yes
-fi
+stage_only=no
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rotate) rotate=yes ;;
+        --stage) stage_only=yes ;;
+        -*) usage ;;
+        *) [ -z "$addr" ] || usage; addr=$1 ;;
+    esac
+    shift
+done
+
+[ -n "$addr" ] || usage
 
 case "$addr" in
     */*) ;;
@@ -72,17 +79,30 @@ else
 fi
 
 umask 022
-mkdir -p "$DROPIN_DIR"
-printf '# Written by iota-wg-provision. Per-host wg0 address.\n[Network]\nAddress=%s\n' \
-    "$addr" >"$DROPIN"
-echo "Wrote $DROPIN (Address=$addr)."
-
 if command -v restorecon >/dev/null 2>&1; then
-    restorecon -R "$CRED_DIR" "$DROPIN_DIR" 2>/dev/null || true
+    restorecon -R "$CRED_DIR" 2>/dev/null || true
 fi
 
-# Credentials are imported at service start, so a reload is not enough.
-systemctl restart systemd-networkd.service
+if [ ! -e "$SITE_CURRENT" ] && [ "$stage_only" = no ]; then
+    /usr/libexec/iota-site stage --wg-address "$addr" --tries 3 --force
+    /usr/libexec/iota-site commit
+    /usr/libexec/iota-site-apply
+    # Credentials are imported at service start, so a reload is not enough.
+    systemctl restart systemd-networkd.service
+else
+    cur_addr=
+    if [ -f "$SITE_CURRENT/wg0-address.conf" ]; then
+        cur_addr=$(awk -F= '/^Address=/{print $2; exit}' "$SITE_CURRENT/wg0-address.conf" || true)
+    fi
+
+    if [ "$rotate" = yes ] && [ "$stage_only" = no ] && [ -n "$cur_addr" ] && [ "$cur_addr" = "$addr" ]; then
+        echo "Key rotated with unchanged address ($addr); restarting systemd-networkd."
+        systemctl restart systemd-networkd.service
+    else
+        /usr/libexec/iota-site stage --wg-address "$addr" --tries 3
+        echo "Staged address $addr as pending site generation; reboot to trial and auto-commit (keeping current as last-known-good)."
+    fi
+fi
 
 host_ip=${addr%/*}
 cat <<EOF
