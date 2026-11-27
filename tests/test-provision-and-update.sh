@@ -102,7 +102,7 @@ ssh_guest '
 verify_mounts_and_selinux
 wait_boot_health
 test "$(ssh_guest 'cat /etc/machine-id')" = "$EXPECTED_MACHINE_ID"
-test "$(ssh_guest 'hostname')" = "$EXPECTED_HOSTNAME"
+test "$(ssh_guest 'uname -n')" = "$EXPECTED_HOSTNAME"
 wait_wg0 "$EXPECTED_WG_ADDR"
 test "$(ssh_guest 'wg show wg0 public-key')" = "$EXPECTED_WG_PUBKEY"
 ssh_guest '/usr/libexec/iota-site status | grep -qx "current: gens/1"'
@@ -152,7 +152,7 @@ fi
 verify_mounts_and_selinux
 wait_boot_health
 test "$(ssh_guest 'cat /etc/machine-id')" = "$EXPECTED_MACHINE_ID"
-test "$(ssh_guest 'hostname')" = "$EXPECTED_HOSTNAME"
+test "$(ssh_guest 'uname -n')" = "$EXPECTED_HOSTNAME"
 wait_wg0 "$EXPECTED_WG_ADDR"
 test "$(ssh_guest 'wg show wg0 public-key')" = "$EXPECTED_WG_PUBKEY"
 test "$(ssh_guest 'cat /var/lib/ssh/ssh_host_ed25519_key.pub')" = "$(cat /tmp/provision-ssh-hostkey.txt)"
