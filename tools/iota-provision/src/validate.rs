@@ -140,6 +140,7 @@ pub fn generate_repart_configs(
     root_slot_size_mib: u64,
     luks_mode: &LuksMode,
 ) -> Vec<(&'static str, String)> {
+    let verity_mib = root_slot_size_mib.div_ceil(64).max(16);
     let encrypt_line = match luks_mode {
         LuksMode::Prompt | LuksMode::PassphraseFile(_) => "Encrypt=key-file\n",
         LuksMode::Tpm2 => "Encrypt=tpm2\n",
@@ -153,8 +154,9 @@ pub fn generate_repart_configs(
         ),
         (
             "11-root-verity.conf",
-            "[Partition]\nType=root-verity\nReadOnly=yes\nSizeMinBytes=64M\nSizeMaxBytes=64M\n"
-                .to_string(),
+            format!(
+                "[Partition]\nType=root-verity\nReadOnly=yes\nSizeMinBytes={verity_mib}M\nSizeMaxBytes={verity_mib}M\n"
+            ),
         ),
         (
             "12-root.conf",
@@ -164,8 +166,9 @@ pub fn generate_repart_configs(
         ),
         (
             "21-root-verity.conf",
-            "[Partition]\nType=root-verity\nLabel=_empty\nReadOnly=yes\nSizeMinBytes=64M\nSizeMaxBytes=64M\n"
-                .to_string(),
+            format!(
+                "[Partition]\nType=root-verity\nLabel=_empty\nReadOnly=yes\nSizeMinBytes={verity_mib}M\nSizeMaxBytes={verity_mib}M\n"
+            ),
         ),
         (
             "22-root.conf",
@@ -271,13 +274,19 @@ part /dev/sda2 4d21b016-b534-45c2-a9fb-5c16e091fd2d var
     fn repart_generation() {
         let pass = generate_repart_configs(2048, &LuksMode::PassphraseFile(PathBuf::from("/k")));
         assert_eq!(pass.len(), 6);
+        assert!(pass[1].1.contains("SizeMinBytes=32M\nSizeMaxBytes=32M\n"));
+        assert!(pass[3].1.contains("SizeMinBytes=32M\nSizeMaxBytes=32M\n"));
         assert!(pass[5].1.contains("Encrypt=key-file\n"));
 
         let tpm2 = generate_repart_configs(4096, &LuksMode::Tpm2);
+        assert!(tpm2[1].1.contains("SizeMinBytes=64M\nSizeMaxBytes=64M\n"));
         assert!(tpm2[2].1.contains("SizeMinBytes=4096M"));
+        assert!(tpm2[3].1.contains("SizeMinBytes=64M\nSizeMaxBytes=64M\n"));
         assert!(tpm2[5].1.contains("Encrypt=tpm2\n"));
 
-        let none = generate_repart_configs(2048, &LuksMode::None);
-        assert!(!none[5].1.contains("Encrypt="));
+        let small = generate_repart_configs(512, &LuksMode::None);
+        assert!(small[1].1.contains("SizeMinBytes=16M\nSizeMaxBytes=16M\n"));
+        assert!(small[3].1.contains("SizeMinBytes=16M\nSizeMaxBytes=16M\n"));
+        assert!(!small[5].1.contains("Encrypt="));
     }
 }
