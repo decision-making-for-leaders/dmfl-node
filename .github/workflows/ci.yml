@@ -74,3 +74,79 @@ jobs:
         run: |
           pkill -f qemu-system-x86_64 || true
           if [ -n "${HTTP_PID:-}" ]; then kill "$HTTP_PID" 2>/dev/null || true; fi
+
+  provision-and-update-e2e:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Setup mkosi
+        uses: systemd/mkosi@v27
+
+      - name: Setup QEMU & dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils ovmf systemd-container \
+            systemd-ukify sbsigntool socat openssh-client python3-pip systemd-boot \
+            systemd-repart python3-pefile binutils mtools erofs-utils xfsprogs zstd \
+            dnf policycoreutils wireguard-tools cargo rustc
+
+          # Ensure KVM acceleration is accessible
+          test -e /dev/kvm && sudo chmod 666 /dev/kvm || true
+
+      - name: Build & Test iota-provision (Rust)
+        run: |
+          cargo test --workspace
+          cargo build --release -p iota-provision
+
+      - name: Prepare Host SSH Key & Test Transfer URLs
+        run: ./tests/prepare-provision-ci.sh
+
+      - name: Build v1.0.0 Base Image
+        run: ./tests/build-base.sh
+
+      - name: Build v1.0.1 Update Payload & Start HTTP Server
+        run: ./tests/build-update.sh
+
+      - name: Provision Offline & Verify Boot + systemd-sysupdate
+        run: ./tests/test-provision-and-update.sh
+
+      - name: Show serial logs on failure
+        if: failure()
+        run: |
+          for f in /tmp/guest-diag-provision-boot1.txt /tmp/guest-diag-provision-boot2.txt; do
+            if [ -s "$f" ]; then
+              echo "::group::$f"
+              cat "$f"
+              echo "::endgroup::"
+            fi
+          done
+          for f in /tmp/serial-provision-boot1.log /tmp/serial-provision-boot2.log; do
+            echo "::group::tail of $f"
+            tail -n 300 "$f" 2>/dev/null || echo "(missing)"
+            echo "::endgroup::"
+          done
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: provision-and-update-e2e-debug
+          if-no-files-found: ignore
+          path: |
+            /tmp/guest-diag-provision-boot1.txt
+            /tmp/guest-diag-provision-boot2.txt
+            /tmp/serial-provision-boot1.log
+            /tmp/serial-provision-boot2.log
+            /tmp/http-server.log
+
+      - name: Cleanup background processes
+        if: always()
+        run: |
+          pkill -f qemu-system-x86_64 || true
+          if [ -n "${HTTP_PID:-}" ]; then kill "$HTTP_PID" 2>/dev/null || true; fi

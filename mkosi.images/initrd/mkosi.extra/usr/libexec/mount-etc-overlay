@@ -50,12 +50,7 @@ if mountpoint -q /sysroot/var; then
     mount --bind /sysroot/var/lib/credstore.encrypted /sysroot/etc/credstore.encrypted
 
     if [ -s /sysroot/var/lib/iota/machine-id ]; then
-        cp -f /sysroot/var/lib/iota/machine-id /sysroot/etc/machine-id
-        chmod 0444 /sysroot/etc/machine-id
-        if [ -x /sysroot/usr/sbin/setfiles ] \
-            && [ -f /sysroot/etc/selinux/targeted/contexts/files/file_contexts ]; then
-            chroot /sysroot /usr/sbin/setfiles -m -F \
-                /etc/selinux/targeted/contexts/files/file_contexts /etc/machine-id || true
-        fi
+        [ -e /sysroot/etc/machine-id ] || : > /sysroot/etc/machine-id
+        mount --bind /sysroot/var/lib/iota/machine-id /sysroot/etc/machine-id
     fi
 fi

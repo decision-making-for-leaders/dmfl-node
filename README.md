@@ -128,6 +128,17 @@ Per-host SSH authorization and secrets stay out of the public image and release 
    KEY_B64=$(base64 -w0 ~/.ssh/id_ed25519.pub)
    -smbios "type=11,value=io.systemd.credential.binary:ssh.authorized_keys.root=${KEY_B64}"
    ```
+4. **Offline Installer CLI from Arch Linux / Rescue Mode (`tools/iota-provision`):**
+   Build and run the `iota-provision` Rust CLI as root from an Arch Linux live ISO, workstation, or Rescue environment to flash a public `.raw.zst`/`.raw` image (optional via `--image`), create the Slot B + `/var` partitions with `systemd-repart`, and pre-provision LUKS, SSH keys (`<ESP>/unlock/authorized_keys` and `/var/roothome/.ssh/authorized_keys`), target `machine-id`, encrypted WireGuard credential, and Tier 3 site config (`wg0` address and hostname) before first boot:
+   ```bash
+   just provision \
+     --image iota_20260101_x86-64.raw.zst \
+     --target /dev/nvme0n1 \
+     --ssh-key ~/.ssh/id_ed25519.pub \
+     --wg-address 10.100.0.42/24 \
+     --hostname node-42
+   ```
+   (Or build and run directly with `cargo build --release -p iota-provision && sudo ./target/release/iota-provision ...`.)
 
 ### 7. Why In-Image Config Over `confext` (`systemd 262.2` Evaluation)
 

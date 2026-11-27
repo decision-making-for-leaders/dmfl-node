@@ -37,22 +37,22 @@ if [ -n "${GITHUB_ENV:-}" ]; then
   echo "HTTP_PID=$HTTP_PID" >> "$GITHUB_ENV"
 fi
 
-# Build v1.0.2 with a bad fleet firewall policy (blocks host egress) to test
-# health-gated slot rollback without hacking /etc inside the guest.
+# Build v1.0.2 with a broken firewalld drop-in in /usr to test health-gated
+# slot rollback without hacking /etc inside the guest.
 cd - >/dev/null
-BAD_POLICY=mkosi.extra/usr/lib/firewalld/policies/99-ci-bad-policy.xml
+BAD_DROPIN_DIR=mkosi.extra/usr/lib/systemd/system/firewalld.service.d
+BAD_DROPIN="$BAD_DROPIN_DIR/99-ci-bad-policy.conf"
 cleanup_bad_policy() {
-  rm -f "$BAD_POLICY"
+  rm -f "$BAD_DROPIN"
+  rmdir "$BAD_DROPIN_DIR" 2>/dev/null || true
 }
 trap cleanup_bad_policy EXIT
 
-cat > "$BAD_POLICY" <<'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<policy target="REJECT" priority="-10">
-  <short>CI bad egress policy</short>
-  <ingress-zone name="HOST"/>
-  <egress-zone name="ANY"/>
-</policy>
+mkdir -p "$BAD_DROPIN_DIR"
+cat > "$BAD_DROPIN" <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/bin/false
 EOF
 
 sudo rm -rf mkosi.output/*

@@ -145,7 +145,7 @@ if [ "$site_mode" = "pending" ]; then
     log_msg "iota-boot-health: FAIL on pending site config ($fail_reason); rebooting to consume site try"
     systemctl --no-block reboot
     exit 1
-elif [ "$bless_status" = "indeterminate" ]; then
+elif [ "$bless_status" = "indeterminate" ] || [ "$bless_status" = "dirty" ] || [ "$bless_status" = "bad" ]; then
     log_msg "iota-boot-health: FAIL on unblessed OS slot ($fail_reason); rebooting to consume boot try"
     systemctl --no-block reboot
     exit 1

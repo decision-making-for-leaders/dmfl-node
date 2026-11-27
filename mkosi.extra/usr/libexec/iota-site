@@ -152,8 +152,8 @@ cmd_stage() {
 
     if [ "$force" = no ] && [ -x /usr/lib/systemd/systemd-bless-boot ]; then
         bless_status=$(/usr/lib/systemd/systemd-bless-boot status 2>/dev/null || true)
-        if [ "$bless_status" = "indeterminate" ]; then
-            echo "error: OS slot is unblessed (indeterminate); refusing to stage site config without --force" >&2
+        if [ "$bless_status" = "indeterminate" ] || [ "$bless_status" = "dirty" ] || [ "$bless_status" = "bad" ]; then
+            echo "error: OS slot is unblessed ($bless_status); refusing to stage site config without --force" >&2
             exit 1
         fi
     fi
