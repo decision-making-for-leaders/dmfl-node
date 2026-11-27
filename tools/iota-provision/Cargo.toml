@@ -1,0 +1,7 @@
+[package]
+name = "iota-provision"
+version = "0.1.0"
+edition = "2021"
+description = "Offline Tier 1/Tier 3 provisioner for Iota images"
+
+[dependencies]

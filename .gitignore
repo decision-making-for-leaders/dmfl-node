@@ -32,3 +32,5 @@ mkosi.version
 *.swp
 *.swo
 
+# Rust build artifacts
+/target/
