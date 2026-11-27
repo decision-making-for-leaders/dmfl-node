@@ -15,3 +15,4 @@ fi
 
 mkdir -p /etc/systemd/system
 ln -sf /dev/null /etc/systemd/system/sshd-keygen.target
+ln -sf /dev/null /etc/systemd/system/systemd-machine-id-commit.service
