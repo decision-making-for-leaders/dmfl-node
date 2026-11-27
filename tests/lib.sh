@@ -125,7 +125,12 @@ capture_guest_diagnostics() {
     getenforce || true
     ausearch -m avc -ts boot 2>/dev/null || grep -i avc /var/log/audit/audit.log 2>/dev/null || journalctl -b | grep -i avc || true
     echo "==== SELinux labels (/var, /etc, /run) ===="
-    ls -ldZ /var /var/etc /var/.etc-work /etc /run /run/dbus 2>/dev/null || true
+    ls -ldZ /var /var/lib/iota /var/lib/ssh /var/lib/credstore.encrypted /etc /run /run/.etc-overlay /run/dbus 2>/dev/null || true
+    echo "==== volatile /etc upperdir diff ===="
+    find /run/.etc-overlay/upper -maxdepth 4 -ls 2>/dev/null || true
+    echo "==== iota site & health status ===="
+    /usr/libexec/iota-site status 2>/dev/null || true
+    systemctl status iota-boot-health.service iota-site-apply.service iota-ssh-hostkeys.service --no-pager -l || true
     echo "==== journalctl -b -p err ===="
     journalctl -b -p err -n 200 --no-pager || true
   ' > "$out" 2>&1 || true
@@ -171,22 +176,70 @@ poweroff_guest() {
   wait "$pid" || true
 }
 
-# wait_wg0
+# wait_for_serial_pattern <log> <start-line> <regex> <timeout-sec>
+# Polls lines appended to <log> after <start-line> until <regex> matches or FATAL_RE triggers.
+wait_for_serial_pattern() {
+  local log=$1 start_line=$2 regex=$3 timeout=$4
+  local deadline
+  deadline=$(($(date +%s) + timeout))
+  while true; do
+    if tail -n "+$((start_line + 1))" "$log" 2>/dev/null | grep -qaE "$regex"; then
+      return 0
+    fi
+    if tail -n "+$((start_line + 1))" "$log" 2>/dev/null | grep -qaE "$FATAL_RE"; then
+      echo "::error::Fatal boot state detected in $log while waiting for '$regex'"
+      tail -n "+$((start_line + 1))" "$log" | grep -aE "$FATAL_RE" | head -n 10 || true
+      return 2
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "::error::Timed out waiting for '$regex' in $log (after line $start_line)"
+      tail -n "+$((start_line + 1))" "$log" | tail -n 50 || true
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# wait_wg0 [expected-addr]
 # Waits for the image-baked wg0 to exist with the provisioned address and port.
 wait_wg0() {
-  ssh_guest '
+  local expected_addr=${1:-10.100.0.10/24}
+  if ! ssh_guest "EXPECTED_ADDR='$expected_addr' bash -s" <<'EOF'
     set -euo pipefail
     for _ in $(seq 1 20); do
-      ip -br addr show wg0 2>/dev/null | grep -qF 10.100.0.10/24 && break
+      ip -br addr show wg0 2>/dev/null | grep -qF "$EXPECTED_ADDR" && break
       sleep 1
     done
-    ip -br addr show wg0 | grep -qF 10.100.0.10/24
+    ip -br addr show wg0 | grep -qF "$EXPECTED_ADDR"
     test "$(wg show wg0 listen-port)" = 51820
     test -f /etc/credstore.encrypted/network.wireguard.private.wg0
-  ' || {
+EOF
+  then
     ssh_guest 'networkctl status wg0 --no-pager || true; journalctl -b -u systemd-networkd --no-pager | tail -n 50' || true
     return 1
-  }
+  fi
+}
+
+# wait_boot_health
+# Waits for iota-boot-health.service to finish activating and succeed.
+wait_boot_health() {
+  ssh_guest '
+    set -euo pipefail
+    for _ in $(seq 1 45); do
+      state=$(systemctl is-active iota-boot-health.service || true)
+      case "$state" in
+        active) exit 0 ;;
+        failed)
+          systemctl status iota-boot-health.service --no-pager -l || true
+          journalctl -b -u iota-boot-health.service --no-pager || true
+          exit 1
+          ;;
+      esac
+      sleep 1
+    done
+    systemctl status iota-boot-health.service --no-pager -l || true
+    exit 1
+  '
 }
 
 verify_mounts_and_selinux() {
@@ -196,5 +249,6 @@ verify_mounts_and_selinux() {
     ssh_guest 'test "$(findmnt -n -o SOURCE /var)" = "$(blkid -t PARTLABEL=var -o device)"'
   fi
   ssh_guest 'test "$(findmnt -n -o FSTYPE /etc)" = "overlay"'
+  ssh_guest 'findmnt -n -o OPTIONS /etc | grep -qF "upperdir=/run/.etc-overlay/upper"'
   ssh_guest 'getenforce | grep -qx Enforcing'
 }
