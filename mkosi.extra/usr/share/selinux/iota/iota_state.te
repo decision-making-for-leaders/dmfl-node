@@ -1,0 +1,19 @@
+module iota_state 1.0;
+
+require {
+    type sshd_t;
+    type var_t;
+    type var_lib_t;
+    type sshd_key_t;
+    type ssh_home_t;
+    type etc_t;
+    class dir { getattr search open read };
+    class file { getattr open read };
+}
+
+allow sshd_t var_t:dir { getattr search };
+allow sshd_t var_lib_t:dir { getattr search };
+allow sshd_t sshd_key_t:dir { getattr search open read };
+allow sshd_t sshd_key_t:file { getattr open read };
+allow sshd_t ssh_home_t:dir { getattr search open read };
+allow sshd_t ssh_home_t:file { getattr open read };

@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+if mountpoint -q /sysroot/var; then
+    mkdir -p /sysroot/var/lib/iota /sysroot/var/lib/iota/site/gens \
+        /sysroot/var/lib/credstore.encrypted /sysroot/var/lib/ssh
+    chmod 0700 /sysroot/var/lib/credstore.encrypted /sysroot/var/lib/ssh
+
+    if [ ! -s /sysroot/var/lib/iota/machine-id ] && [ -r /proc/sys/kernel/random/uuid ]; then
+        tr -d '-' < /proc/sys/kernel/random/uuid > /sysroot/var/lib/iota/machine-id
+        chmod 0444 /sysroot/var/lib/iota/machine-id
+    fi
+
+    if [ ! -e /sysroot/var/.selinux-labeled ] \
+        && [ -x /sysroot/usr/sbin/setfiles ] \
+        && [ -f /sysroot/etc/selinux/targeted/contexts/files/file_contexts ]; then
+        : > /sysroot/var/.selinux-labeled
+        if ! chroot /sysroot /usr/sbin/setfiles -m -F \
+            /etc/selinux/targeted/contexts/files/file_contexts /var; then
+            rm -f /sysroot/var/.selinux-labeled
+            exit 1
+        fi
+    elif [ -x /sysroot/usr/sbin/setfiles ] \
+        && [ -f /sysroot/etc/selinux/targeted/contexts/files/file_contexts ]; then
+        chroot /sysroot /usr/sbin/setfiles -m -F \
+            /etc/selinux/targeted/contexts/files/file_contexts \
+            /var/lib/iota /var/lib/credstore.encrypted /var/lib/ssh || true
+        if [ -d /sysroot/var/roothome/.ssh ]; then
+            chroot /sysroot /usr/sbin/setfiles -m -F \
+                /etc/selinux/targeted/contexts/files/file_contexts \
+                /var/roothome/.ssh || true
+        fi
+    fi
+fi
+
+# Dedicated tmpfs for volatile /etc overlay so nothing written to /etc persists
+# across reboots and /run relabeling does not walk into upperdir.
+mkdir -p /run/.etc-overlay
+mount -t tmpfs -o mode=0755,size=64m tmpfs /run/.etc-overlay
+upper=/run/.etc-overlay/upper
+work=/run/.etc-overlay/work
+mkdir -p "$upper" "$work"
+
+mount -t overlay overlay \
+    -o "lowerdir=/sysroot/etc,upperdir=$upper,workdir=$work" \
+    /sysroot/etc
+
+if mountpoint -q /sysroot/var; then
+    mkdir -p /sysroot/etc/credstore.encrypted
+    mount --bind /sysroot/var/lib/credstore.encrypted /sysroot/etc/credstore.encrypted
+
+    if [ -s /sysroot/var/lib/iota/machine-id ]; then
+        cp -f /sysroot/var/lib/iota/machine-id /sysroot/etc/machine-id
+        chmod 0444 /sysroot/etc/machine-id
+        if [ -x /sysroot/usr/sbin/setfiles ] \
+            && [ -f /sysroot/etc/selinux/targeted/contexts/files/file_contexts ]; then
+            chroot /sysroot /usr/sbin/setfiles -m -F \
+                /etc/selinux/targeted/contexts/files/file_contexts /etc/machine-id || true
+        fi
+    fi
+fi

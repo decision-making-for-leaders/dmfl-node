@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+(
+    cd /usr/share/selinux/iota
+    checkmodule -M -m -o iota_state.mod iota_state.te
+    semodule_package -o iota_state.pp -m iota_state.mod -f iota_state.fc
+    semodule -n -i iota_state.pp
+    rm -f iota_state.mod
+)
+
+if [ -f /etc/ssh/sshd_config ]; then
+    sed -i -E 's|^([[:space:]]*HostKey[[:space:]]+/etc/ssh/ssh_host_)|#\1|' /etc/ssh/sshd_config
+fi
+
+mkdir -p /etc/systemd/system
+ln -sf /dev/null /etc/systemd/system/sshd-keygen.target

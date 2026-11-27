@@ -1,0 +1,10 @@
+# Fallback DHCP control path so SSH/sysupdate connectivity never depends
+# solely on user-supplied or WireGuard configuration.
+
+[Match]
+Type=ether
+Kind=!*
+
+[Network]
+DHCP=yes
+IPv6AcceptRA=yes
