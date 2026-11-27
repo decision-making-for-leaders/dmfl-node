@@ -42,6 +42,13 @@ verify_mounts_and_selinux
 ssh_guest 'mkdir -p /var/lib && echo "var-persisted-from-1.0.0" > /var/lib/persist-test'
 ssh_guest 'echo "etc-persisted-from-1.0.0" > /etc/persist-etc-test'
 
+# 3b. WireGuard: image-baked wg0 is inert without a credential, then comes up
+#     after per-host provisioning (secret + address live on the /etc overlay).
+ssh_guest '! ip link show wg0 >/dev/null 2>&1'
+ssh_guest '/usr/libexec/iota-wg-provision 10.100.0.10/24'
+wait_wg0
+ssh_guest 'wg show wg0 public-key' | tee /tmp/wg0-pubkey-v100.txt
+
 # Record how the ESP is mounted on the running v1.0.0 system (useful for debugging UUID mismatches)
 ssh_guest 'findmnt /efi; blkid | grep -i vfat; cat /etc/fstab 2>/dev/null || true' | tee /tmp/guest-esp-v100.txt
 

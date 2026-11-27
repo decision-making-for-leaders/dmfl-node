@@ -1,0 +1,99 @@
+#!/bin/sh
+# Provision this host's per-host WireGuard state for the image-baked wg0.
+#
+#   iota-wg-provision <address>/<prefix> [--rotate]
+#
+# - Generates a private key (once) and stores it as an encrypted systemd
+#   credential in /etc/credstore.encrypted (bound to TPM2 + host key if a
+#   TPM2 is present, otherwise to /var/lib/systemd/credential.secret).
+# - Writes the per-host tunnel address as a drop-in for 50-wg0.network.
+# - Restarts systemd-networkd so it imports the credential and creates wg0.
+# - Prints the public key to add as a [WireGuardPeer] in 50-wg0.netdev.
+#
+# Everything written lives under /etc (overlay upper on /var), so it survives
+# A/B updates and rollbacks; the topology itself stays in the image.
+set -eu
+
+CRED_NAME=network.wireguard.private.wg0
+CRED_DIR=/etc/credstore.encrypted
+CRED="$CRED_DIR/$CRED_NAME"
+DROPIN_DIR=/etc/systemd/network/50-wg0.network.d
+DROPIN="$DROPIN_DIR/10-address.conf"
+
+usage() {
+    echo "Usage: $0 <address>/<prefix> [--rotate]" >&2
+    echo "Example: $0 10.100.0.3/24" >&2
+    exit 2
+}
+
+[ $# -ge 1 ] && [ $# -le 2 ] || usage
+addr=$1
+rotate=no
+if [ $# -eq 2 ]; then
+    [ "$2" = "--rotate" ] || usage
+    rotate=yes
+fi
+
+case "$addr" in
+    */*) ;;
+    *) echo "error: address must include a prefix length, e.g. 10.100.0.3/24" >&2; exit 2 ;;
+esac
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "error: must be run as root" >&2
+    exit 1
+fi
+
+umask 077
+mkdir -p "$CRED_DIR"
+chmod 0700 "$CRED_DIR"
+
+if [ -e "$CRED" ] && [ "$rotate" = no ]; then
+    echo "Reusing existing credential $CRED (pass --rotate to replace it)."
+    pubkey=$(systemd-creds decrypt --name="$CRED_NAME" "$CRED" - | wg pubkey)
+else
+    if systemd-creds has-tpm2 --quiet 2>/dev/null; then
+        # No PCR binding: UKI updates change PCR 11 and firmware updates can
+        # change PCR 7, which would make the key undecryptable after updates.
+        set -- --with-key=host+tpm2 --tpm2-pcrs=
+    else
+        set -- --with-key=host
+    fi
+
+    privkey=$(wg genkey)
+    tmp="$CRED.tmp.$$"
+    trap 'rm -f "$tmp"' EXIT
+    printf '%s' "$privkey" | systemd-creds encrypt --name="$CRED_NAME" "$@" - "$tmp"
+    mv -f "$tmp" "$CRED"
+    trap - EXIT
+    pubkey=$(printf '%s\n' "$privkey" | wg pubkey)
+    unset privkey
+    echo "Wrote encrypted credential $CRED ($*)."
+fi
+
+umask 022
+mkdir -p "$DROPIN_DIR"
+printf '# Written by iota-wg-provision. Per-host wg0 address.\n[Network]\nAddress=%s\n' \
+    "$addr" >"$DROPIN"
+echo "Wrote $DROPIN (Address=$addr)."
+
+if command -v restorecon >/dev/null 2>&1; then
+    restorecon -R "$CRED_DIR" "$DROPIN_DIR" 2>/dev/null || true
+fi
+
+# Credentials are imported at service start, so a reload is not enough.
+systemctl restart systemd-networkd.service
+
+host_ip=${addr%/*}
+cat <<EOF
+
+Public key for $(hostname): $pubkey
+
+Add this host to mkosi.extra/usr/lib/systemd/network/50-wg0.netdev:
+
+[WireGuardPeer]
+PublicKey=$pubkey
+AllowedIPs=$host_ip/32
+Endpoint=<public address of this host>:51820
+PersistentKeepalive=25
+EOF

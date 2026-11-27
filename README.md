@@ -62,6 +62,33 @@ All transfers set `ProtectVersion=%A` to prevent overwriting the currently boote
 - **Base services & tools:** `systemd-networkd`, `systemd-resolved`, `systemd-timesyncd`, socket-activated `sshd.socket`, `firewalld`, `podman`, `wireguard-tools`, `fish`, `vim` (`EDITOR`/`VISUAL`), and `bat` (`PAGER`).
 - **Repositories:** AlmaLinux 10 + EPEL + CentOS Stream Hyperscale SIG `systemd` repo (`mkosi.sandbox/etc/yum.repos.d/centos-hyperscale-systemd.repo`).
 
+### 5. WireGuard Mesh: Topology in the Image, Secrets on the Host
+
+Release artifacts are public, so WireGuard config is split in two:
+
+| What | Where | Versioned by |
+|------|-------|--------------|
+| Interface, listen port, full peer list (public keys, endpoints, `AllowedIPs`) | `mkosi.extra/usr/lib/systemd/network/50-wg0.{netdev,network}` (dm-verity `/usr`) | A/B slots, rolls back with `systemd-bless-boot` |
+| Inbound `51820/udp` | `mkosi.extra/usr/lib/firewalld/policies/iota-wireguard-ingress.xml` | A/B slots |
+| Per-host private key | `/etc/credstore.encrypted/network.wireguard.private.wg0` (encrypted `systemd-creds`, TPM2+host key if available) | Persistent `/var` (via the `/etc` overlay) |
+| Per-host tunnel address | `/etc/systemd/network/50-wg0.network.d/10-address.conf` | Persistent `/var` (via the `/etc` overlay) |
+
+- `50-wg0.netdev` uses `PrivateKey=@network.wireguard.private.wg0`. `systemd-networkd.service` already has `ImportCredential=network.wireguard.*`, which searches `/etc/credstore.encrypted`, so you don't need a unit drop-in.
+- `[Match] Credential=network.wireguard.private.wg0` makes `wg0` inert on hosts that haven't been provisioned.
+- You can list every node, including the local one, as a `[WireGuardPeer]`. The kernel silently ignores a peer whose public key matches its own, so one peer list works on every host.
+
+**Provisioning a node (once per host):**
+
+```bash
+/usr/libexec/iota-wg-provision 10.100.0.3/24
+```
+
+This generates the key, encrypts it (no PCR binding, so UKI and firmware updates don't lock it out), writes the address drop-in, restarts `systemd-networkd`, and prints the `[WireGuardPeer]` block to commit into `50-wg0.netdev`. Peers learn about the new node from the next release.
+
+> [!NOTE]
+> Rollbacks revert topology, not keys. The private key stays on `/var`. If a node rotates its key (`--rotate`), its peers need a release that contains the new public key, and rolling a peer back to an older release brings the old key back.
+
+
 ---
 
 ## Repository Structure

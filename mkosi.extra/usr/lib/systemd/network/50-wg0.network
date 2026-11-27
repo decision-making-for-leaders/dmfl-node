@@ -1,0 +1,18 @@
+# Shared wg0 network settings — baked into the image (see 50-wg0.netdev).
+#
+# The tunnel address is per host and is NOT set here. It is supplied by a
+# drop-in on the persistent /etc overlay, written by iota-wg-provision:
+#   /etc/systemd/network/50-wg0.network.d/10-address.conf
+#     [Network]
+#     Address=10.100.0.X/24
+
+[Match]
+Name=wg0
+
+[Link]
+# Don't let the overlay block network-online.target (e.g. while peers are down).
+RequiredForOnline=no
+
+[Network]
+# The Address= prefix (e.g. /24) installs the on-link route for the mesh
+# subnet; add [Route] sections here for anything routed via a peer.

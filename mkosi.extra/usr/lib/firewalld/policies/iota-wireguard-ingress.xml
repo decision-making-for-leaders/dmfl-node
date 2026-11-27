@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Accept inbound WireGuard handshakes on 51820/udp from any zone.
+  Shipped as a policy in /usr/lib/firewalld so it neither overrides the
+  packaged public zone nor needs per-host /etc changes. Harmless on hosts
+  where wg0 is not provisioned (nothing listens on the port).
+-->
+<policy target="CONTINUE" priority="-100">
+  <short>Iota WireGuard ingress</short>
+  <description>Allow WireGuard (51820/udp) to reach the host.</description>
+  <ingress-zone name="ANY"/>
+  <egress-zone name="HOST"/>
+  <port protocol="udp" port="51820"/>
+</policy>

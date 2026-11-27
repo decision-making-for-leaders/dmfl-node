@@ -171,6 +171,24 @@ poweroff_guest() {
   wait "$pid" || true
 }
 
+# wait_wg0
+# Waits for the image-baked wg0 to exist with the provisioned address and port.
+wait_wg0() {
+  ssh_guest '
+    set -euo pipefail
+    for _ in $(seq 1 20); do
+      ip -br addr show wg0 2>/dev/null | grep -qF 10.100.0.10/24 && break
+      sleep 1
+    done
+    ip -br addr show wg0 | grep -qF 10.100.0.10/24
+    test "$(wg show wg0 listen-port)" = 51820
+    test -f /etc/credstore.encrypted/network.wireguard.private.wg0
+  ' || {
+    ssh_guest 'networkctl status wg0 --no-pager || true; journalctl -b -u systemd-networkd --no-pager | tail -n 50' || true
+    return 1
+  }
+}
+
 verify_mounts_and_selinux() {
   if [ "${SSH_VAR_LUKS:-false}" = "true" ]; then
     ssh_guest 'test "$(findmnt -n -o SOURCE /var)" = "/dev/mapper/var"'

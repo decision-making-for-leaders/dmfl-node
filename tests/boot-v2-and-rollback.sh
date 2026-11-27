@@ -55,6 +55,11 @@ verify_mounts_and_selinux
 ssh_guest 'test "$(cat /var/lib/persist-test)" = "var-persisted-from-1.0.0"'
 ssh_guest 'test "$(cat /etc/persist-etc-test)" = "etc-persisted-from-1.0.0"'
 
+# Verify wg0 comes up on the new slot: topology from the 1.0.1 image, private
+# key + address from the persistent credential/drop-in provisioned on 1.0.0.
+wait_wg0
+test "$(ssh_guest 'wg show wg0 public-key')" = "$(cat /tmp/wg0-pubkey-v100.txt)"
+
 # Verify systemd-boot decremented +3-0 -> +2-1 and systemd-bless-boot marks it good
 if ! verify_bless_boot; then
   echo "::group::bless-boot diagnostics"
@@ -118,6 +123,11 @@ ssh_guest "lsblk -s -no PARTLABEL /dev/mapper/root | grep -qx iota_1.0.0"
 ssh_guest 'ESP_DIR=$(bootctl --print-esp-path) && ls -la "$ESP_DIR/EFI/Linux/" && test -f "$ESP_DIR/EFI/Linux/iota_1.0.1_x86-64+0-1.efi"'
 ssh_guest 'test "$(cat /var/lib/persist-test)" = "var-persisted-from-1.0.0"'
 ssh_guest 'test "$(cat /etc/persist-etc-test)" = "etc-persisted-from-1.0.0"'
+
+# Verify wg0 still comes up after rolling back: topology from the 1.0.0 image,
+# same persistent per-host key.
+wait_wg0
+test "$(ssh_guest 'wg show wg0 public-key')" = "$(cat /tmp/wg0-pubkey-v100.txt)"
 
 # Clean up the simulated bad-update drop-in from the persistent /etc overlay
 ssh_guest "rm -f /etc/systemd/system/systemd-bless-boot.service.d/simulate-bad-update.conf && rmdir --ignore-fail-on-non-empty /etc/systemd/system/systemd-bless-boot.service.d && systemctl daemon-reload"
